@@ -15,6 +15,7 @@ Prototype scope:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -118,6 +119,9 @@ RUN_QA_REPORTS: dict[str, dict] = {}
 # Last error per run (surfaced in dimensions/review pages so silent fallbacks are visible)
 RUN_LAST_ERROR: dict[str, str] = {}
 
+# P0 intake classification result (slug + confidence + reasoning) per run
+RUN_INTAKE: dict[str, dict] = {}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -204,7 +208,27 @@ async def create_run(
 ):
     run_id = str(uuid.uuid4())[:8]
     now = datetime.now()
-    slug = mock_data.mock_slug_for(description)
+
+    # P0: LLM-driven capability classification (with keyword fallback)
+    intake_client = None
+    if api_key:
+        try:
+            intake_client = llm_phases.build_client(
+                provider=provider,
+                model=model_p1,            # analysis model picks slug
+                api_key=api_key,
+                base_url=base_url or None,
+            )
+        except Exception as exc:
+            print(f"[P0 client build failed] {type(exc).__name__}: {exc}", flush=True)
+            intake_client = None
+
+    from ..phases.intake import classify_with_fallback
+    intake = classify_with_fallback(description, client=intake_client)
+    slug = intake["slug"]
+    print(f"[P0] slug={slug} confidence={intake['confidence']} "
+          f"source={intake.get('source')} is_new={intake.get('is_new')}", flush=True)
+    RUN_INTAKE[run_id] = intake
 
     run = Run(
         id=run_id,
@@ -269,7 +293,29 @@ async def view_run(request: Request, run_id: str):
     if RUN_LAST_ERROR.get(run_id):
         extra["last_error"] = RUN_LAST_ERROR[run_id]
 
+    if RUN_INTAKE.get(run_id):
+        extra["intake"] = RUN_INTAKE[run_id]
+
     return templates.TemplateResponse(request, template, _ctx(run, **extra))
+
+
+@app.post("/runs/{run_id}/slug")
+async def update_slug(run_id: str, slug: str = Form(...)):
+    """Manually override the capability slug (snake_case ASCII required)."""
+    run = _get_run(run_id)
+    slug = slug.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", slug):
+        raise HTTPException(400, f"Slug must be snake_case ASCII, got: {slug!r}")
+    run.capability_slug = slug
+    if run_id in RUN_INTAKE:
+        RUN_INTAKE[run_id] = {
+            **RUN_INTAKE[run_id],
+            "slug": slug,
+            "confidence": "user_set",
+            "source": "user",
+        }
+    run.updated_at = datetime.now()
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
 # ---------------------------------------------------------------------------

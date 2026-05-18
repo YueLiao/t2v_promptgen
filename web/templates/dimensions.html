@@ -2,6 +2,54 @@
 {% block title %}确定评测维度 ｜ {{ run.id }}{% endblock %}
 
 {% block content %}
+{% if intake %}
+<div class="mb-4 bg-white rounded-xl shadow-sm border border-slate-200 p-4"
+     x-data="{ editing: false }">
+  <div class="flex items-center justify-between gap-4 flex-wrap">
+    <div class="flex items-center gap-3 flex-wrap">
+      <span class="text-xs text-slate-500 uppercase tracking-wide">AI 判定本次能力</span>
+      <code class="text-sm font-mono bg-slate-100 px-2 py-0.5 rounded text-slate-800">{{ intake.slug }}</code>
+      {% if intake.display_name_zh %}
+      <span class="text-sm text-slate-700">{{ intake.display_name_zh }}</span>
+      {% endif %}
+      {% set conf = intake.confidence %}
+      <span class="text-xs px-2 py-0.5 rounded
+        {% if conf == 'high' %}bg-green-100 text-green-800
+        {% elif conf == 'medium' %}bg-amber-100 text-amber-800
+        {% elif conf == 'user_set' %}bg-slate-200 text-slate-700
+        {% else %}bg-red-100 text-red-800{% endif %}">
+        置信度
+        {% if conf == 'high' %}高{% elif conf == 'medium' %}中{% elif conf == 'low' %}低{% elif conf == 'user_set' %}用户指定{% else %}{{ conf }}{% endif %}
+      </span>
+      {% if intake.source == 'keyword' %}
+      <span class="text-xs px-2 py-0.5 rounded bg-orange-100 text-orange-700">关键词兜底</span>
+      {% endif %}
+      {% if intake.is_new %}
+      <span class="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700">AI 新造</span>
+      {% endif %}
+    </div>
+    <button @click="editing = !editing" class="text-xs text-slate-500 hover:text-slate-800">
+      <span x-show="!editing">✎ 改 slug</span>
+      <span x-show="editing">取消</span>
+    </button>
+  </div>
+  {% if intake.scope %}
+  <p class="text-xs text-slate-500 mt-2">{{ intake.scope }}</p>
+  {% endif %}
+  {% if intake.reasoning and intake.source == 'llm' %}
+  <p class="text-xs text-slate-400 mt-1">理由:{{ intake.reasoning }}</p>
+  {% endif %}
+  <form x-show="editing" x-cloak method="POST" action="/runs/{{ run.id }}/slug"
+        class="mt-3 flex gap-2 items-center">
+    <input type="text" name="slug" value="{{ intake.slug }}" pattern="[a-z][a-z0-9_]*"
+           class="flex-1 border border-slate-300 rounded px-2 py-1 text-sm font-mono"
+           placeholder="snake_case_only">
+    <button type="submit" class="bg-slate-700 hover:bg-slate-800 text-white text-xs px-3 py-1 rounded">保存</button>
+    <p class="text-xs text-slate-400">只能用小写字母 / 数字 / 下划线</p>
+  </form>
+</div>
+{% endif %}
+
 {% if last_error %}
 <div class="mb-4 bg-amber-50 border border-amber-300 rounded-lg p-4">
   <div class="flex items-start gap-3">
