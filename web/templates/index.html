@@ -6,47 +6,53 @@
 
   <!-- Create new run -->
   <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-    <h2 class="text-xl font-bold text-slate-900 mb-1">新建专项能力 Prompt Set</h2>
-    <p class="text-sm text-slate-500 mb-6">描述你要测的能力,系统会自动迭代出维度并生产 prompt</p>
+    <h2 class="text-xl font-bold text-slate-900 mb-1">新建评测任务</h2>
+    <p class="text-sm text-slate-500 mb-6">告诉我你想测视频模型的哪个能力,我自动产出测试用例 + 评测员说明书</p>
 
-    <form method="POST" action="/runs" class="space-y-5" x-data="{ showLLM: true }">
+    <form method="POST" action="/runs" class="space-y-5">
+
       <div>
         <label class="block text-sm font-medium text-slate-700 mb-1">
-          能力描述 <span class="text-red-500">*</span>
+          你想评测什么? <span class="text-red-500">*</span>
         </label>
         <textarea name="description" rows="4" required
           class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-          placeholder="例:测试 T2V 模型在生成人手时的细节质量,重点关注手指数量、关节角度、握持稳定性、与物体的接触贴合度,以及在不同光照和遮挡条件下的表现"></textarea>
-        <p class="text-xs text-slate-400 mt-1">用自然语言描述要测什么能力、为什么要测、关注哪些细节</p>
+          placeholder="举例:测试视频生成里人手的细节质量 — 重点看手指数量对不对、关节弯曲自不自然、握东西是否稳定、与物体接触有没有穿模,以及不同操作复杂度和光照下的表现"></textarea>
+        <p class="text-xs text-slate-400 mt-1">说人话即可。可以包括:测什么部位 / 关心哪些细节 / 在哪些条件下表现</p>
       </div>
 
       <div class="grid grid-cols-2 gap-4">
         <div>
-          <label class="block text-sm font-medium text-slate-700 mb-1">Set 大小</label>
+          <label class="block text-sm font-medium text-slate-700 mb-1">
+            测试用例数量
+          </label>
           <select name="set_size" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
-            <option value="auto">自动(基于 axes)</option>
-            <option value="40">40</option>
-            <option value="60">60</option>
-            <option value="80">80</option>
-            <option value="100">100</option>
-            <option value="120">120</option>
+            <option value="auto">自动(按测试变量数量决定)</option>
+            <option value="40">40 条(快速)</option>
+            <option value="60">60 条(推荐)</option>
+            <option value="80">80 条</option>
+            <option value="100">100 条</option>
+            <option value="120">120 条(最全)</option>
           </select>
+          <p class="text-xs text-slate-400 mt-1">数量越多耗时越长,60 条约 4-5 分钟</p>
         </div>
         <div>
-          <label class="block text-sm font-medium text-slate-700 mb-1">Provider</label>
+          <label class="block text-sm font-medium text-slate-700 mb-1">
+            选用的 AI 服务
+          </label>
           <select name="provider" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
-            <optgroup label="原生">
+            <optgroup label="官方接口">
               <option value="deepseek" selected>DeepSeek</option>
-              <option value="anthropic">Anthropic</option>
+              <option value="anthropic">Anthropic Claude</option>
               <option value="openai">OpenAI</option>
-              <option value="qwen">Qwen</option>
-              <option value="moonshot">Moonshot</option>
-              <option value="zhipu">智谱</option>
+              <option value="qwen">阿里通义 Qwen</option>
+              <option value="moonshot">月之暗面 Moonshot</option>
+              <option value="zhipu">智谱 GLM</option>
               <option value="siliconflow">SiliconFlow</option>
             </optgroup>
-            <optgroup label="中转">
+            <optgroup label="中转接口(一个 key 调多家)">
               <option value="yibuapi">yibuapi</option>
-              <option value="openai_compat">custom OpenAI-compat</option>
+              <option value="openai_compat">自定义</option>
             </optgroup>
           </select>
         </div>
@@ -55,16 +61,16 @@
       <div class="grid grid-cols-2 gap-4">
         <div>
           <label class="block text-sm font-medium text-slate-700 mb-1">
-            <span class="text-emerald-700">P1 维度生成模型</span>
-            <span class="text-xs text-slate-400 font-normal">(质量,慢,一次性)</span>
+            <span class="text-emerald-700">分析模型</span>
+            <span class="text-xs text-slate-400 font-normal">— 决定要测哪些检查项,用一次,选好的</span>
           </label>
           <input name="model_p1" value="deepseek-v4-pro" placeholder="deepseek-v4-pro"
             class="w-full border border-emerald-300 rounded-lg px-3 py-2 text-sm font-mono">
         </div>
         <div>
           <label class="block text-sm font-medium text-slate-700 mb-1">
-            <span class="text-sky-700">P2 Prompt 生成模型</span>
-            <span class="text-xs text-slate-400 font-normal">(速度,多批次)</span>
+            <span class="text-sky-700">生成模型</span>
+            <span class="text-xs text-slate-400 font-normal">— 批量写测试用例,用得多,选快的</span>
           </label>
           <input name="model_p2" value="deepseek-chat" placeholder="deepseek-chat"
             class="w-full border border-sky-300 rounded-lg px-3 py-2 text-sm font-mono">
@@ -73,15 +79,15 @@
 
       <div class="border-2 border-orange-300 rounded-lg p-4 bg-orange-50">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-sm font-bold text-orange-900">🔑 LLM API Key</h3>
-          <span class="text-xs text-orange-700">不填则用 mock 数据</span>
+          <h3 class="text-sm font-bold text-orange-900">🔑 API 密钥</h3>
+          <span class="text-xs text-orange-700">不填则使用示例数据演示</span>
         </div>
         <input name="api_key" type="password" placeholder="sk-..."
           class="w-full border border-orange-300 rounded-lg px-3 py-2 text-sm font-mono mb-2">
-        <input name="base_url" type="text" placeholder="可选: 覆盖 base_url(留空用 profile 默认)"
+        <input name="base_url" type="text" placeholder="可选:自定义接口地址(留空用默认)"
           class="w-full border border-orange-300 rounded-lg px-3 py-2 text-xs font-mono">
         <p class="text-xs text-orange-800 mt-2">
-          仅本次 run 使用,不会保存。先去 <a href="/settings" class="underline font-medium">⚙ 设置页</a> 测连通。
+          密钥只在本次任务里使用,不会保存。先去 <a href="/settings" class="underline font-medium">⚙ 设置页</a> 测一下连通。
         </p>
       </div>
 
@@ -93,20 +99,20 @@
     </form>
   </div>
 
-  <!-- Quick stats -->
+  <!-- Quick stats / 流程介绍 -->
   <div class="space-y-4">
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
-      <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">已有 Runs</h3>
+      <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">已创建任务</h3>
       <p class="text-3xl font-bold text-slate-900">{{ runs|length }}</p>
     </div>
     <div class="bg-gradient-to-br from-orange-50 to-orange-100 rounded-xl border border-orange-200 p-5">
-      <h3 class="text-sm font-semibold text-orange-700 uppercase tracking-wide mb-2">工作流</h3>
-      <ol class="text-xs text-orange-900 space-y-1">
-        <li>① 录入能力描述</li>
-        <li>② 维度迭代(≤5 轮)</li>
-        <li>③ 自动生成 prompts</li>
-        <li>④ 机器质检 + 用户审核(≤3 轮)</li>
-        <li>⑤ 导出 JSONL + 评测员说明书</li>
+      <h3 class="text-sm font-semibold text-orange-700 uppercase tracking-wide mb-2">流程说明</h3>
+      <ol class="text-xs text-orange-900 space-y-1.5">
+        <li><b>①</b> 你描述要测什么能力</li>
+        <li><b>②</b> AI 自动列出要检查的细分项(最多 5 轮调整)</li>
+        <li><b>③</b> 批量生成测试用例(画面描述)</li>
+        <li><b>④</b> 你看一眼,可改可删(最多 3 轮)</li>
+        <li><b>⑤</b> 导出测试用例 + 评测员说明书</li>
       </ol>
     </div>
   </div>
@@ -116,15 +122,15 @@
 {% if runs %}
 <div class="mt-10 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
   <div class="px-6 py-4 border-b border-slate-200">
-    <h2 class="text-lg font-semibold text-slate-900">所有 Runs</h2>
+    <h2 class="text-lg font-semibold text-slate-900">已创建任务</h2>
   </div>
   <table class="w-full">
     <thead class="bg-slate-50 text-xs font-medium text-slate-500 uppercase tracking-wide">
       <tr>
-        <th class="px-6 py-3 text-left">ID</th>
+        <th class="px-6 py-3 text-left">编号</th>
         <th class="px-6 py-3 text-left">能力</th>
-        <th class="px-6 py-3 text-left">阶段</th>
-        <th class="px-6 py-3 text-left">Prompts</th>
+        <th class="px-6 py-3 text-left">当前阶段</th>
+        <th class="px-6 py-3 text-left">用例数</th>
         <th class="px-6 py-3 text-left">更新时间</th>
         <th class="px-6 py-3"></th>
       </tr>
@@ -145,7 +151,7 @@
         <td class="px-6 py-3 text-sm text-slate-500">{{ r.updated_at.strftime("%m-%d %H:%M") }}</td>
         <td class="px-6 py-3 text-right">
           <a href="/runs/{{ r.id }}" class="text-orange-600 hover:underline text-sm font-medium">查看 →</a>
-          <form method="POST" action="/runs/{{ r.id }}/delete" class="inline ml-3" onsubmit="return confirm('确认删除?')">
+          <form method="POST" action="/runs/{{ r.id }}/delete" class="inline ml-3" onsubmit="return confirm('确认删除这个任务?')">
             <button type="submit" class="text-red-500 hover:underline text-xs">删除</button>
           </form>
         </td>

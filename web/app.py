@@ -109,12 +109,12 @@ PHASE_ORDER = [
 ]
 
 PHASE_LABEL_ZH = {
-    Phase.P0_INTAKE: "意图录入",
-    Phase.P1_DIMENSIONS: "维度迭代",
-    Phase.P2_PROMPTS: "生成 Prompt",
-    Phase.P3_QA: "机器质检",
-    Phase.P4_REVIEW: "用户审核",
-    Phase.P5_EXPORT: "导出",
+    Phase.P0_INTAKE: "理解需求",
+    Phase.P1_DIMENSIONS: "确定评测维度",
+    Phase.P2_PROMPTS: "生成测试用例",
+    Phase.P3_QA: "自动质检",
+    Phase.P4_REVIEW: "审核确认",
+    Phase.P5_EXPORT: "导出结果",
     Phase.DONE: "完成",
 }
 

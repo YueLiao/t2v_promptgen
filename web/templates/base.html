@@ -23,8 +23,8 @@
       <span class="text-xs text-slate-400 font-normal">v0.6 prototype</span>
     </a>
     <div class="text-sm text-slate-300 flex items-center gap-5">
-      <a href="/" class="hover:text-white">所有 Run</a>
-      <a href="/settings" class="hover:text-white">⚙ LLM 配置</a>
+      <a href="/" class="hover:text-white">所有任务</a>
+      <a href="/settings" class="hover:text-white">⚙ API 设置</a>
     </div>
   </div>
 </nav>
@@ -35,11 +35,11 @@
     <div class="flex items-center justify-between mb-3">
       <div>
         <h1 class="text-xl font-bold text-slate-900">{{ run.capability_slug }}</h1>
-        <p class="text-sm text-slate-500">Run ID: <code class="bg-slate-100 px-1 rounded">{{ run.id }}</code> · 创建于 {{ run.created_at.strftime("%Y-%m-%d %H:%M") }}</p>
+        <p class="text-sm text-slate-500">任务编号: <code class="bg-slate-100 px-1 rounded">{{ run.id }}</code> · 创建于 {{ run.created_at.strftime("%Y-%m-%d %H:%M") }}</p>
       </div>
       <div class="text-sm text-slate-600">
-        Provider: <span class="font-mono text-slate-800">{{ run.provider }}</span> /
-        <span class="font-mono text-slate-800">{{ run.model }}</span>
+        服务: <span class="font-mono text-slate-800">{{ run.provider }}</span> ·
+        <span class="font-mono text-slate-800 text-xs">{{ run.model }}</span>
       </div>
     </div>
     <!-- Phase tracker -->

@@ -1,52 +1,52 @@
 {% extends "base.html" %}
-{% block title %}LLM 配置 ｜ t2v_promptgen{% endblock %}
+{% block title %}API 设置 ｜ t2v_promptgen{% endblock %}
 
 {% block content %}
 <div class="max-w-3xl mx-auto" x-data="llmConfig()">
 
   <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
-    <h2 class="text-xl font-bold text-slate-900 mb-1">LLM 配置 + 连通性测试</h2>
-    <p class="text-sm text-slate-500 mb-6">中转 API(yibuapi 等)与原生 API 都用同一个接口</p>
+    <h2 class="text-xl font-bold text-slate-900 mb-1">API 设置与连接测试</h2>
+    <p class="text-sm text-slate-500 mb-6">填好 API 信息,点测试一下能不能正常调用。建好就回去新建任务用。</p>
 
     <div class="grid grid-cols-2 gap-4">
       <div>
-        <label class="block text-sm font-medium text-slate-700 mb-1">Provider Profile</label>
+        <label class="block text-sm font-medium text-slate-700 mb-1">选用的 AI 服务</label>
         <select x-model="provider" @change="updateExample()"
           class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
-          <optgroup label="中转 (OpenAI-compatible)">
-            <option value="yibuapi">yibuapi (亿步)</option>
-            <option value="openai_compat">custom OpenAI-compatible</option>
+          <optgroup label="中转接口(一个 key 调多家)">
+            <option value="yibuapi">yibuapi(亿步)</option>
+            <option value="openai_compat">自定义</option>
           </optgroup>
-          <optgroup label="原生">
-            <option value="anthropic">Anthropic</option>
+          <optgroup label="官方接口">
+            <option value="anthropic">Anthropic Claude</option>
             <option value="openai">OpenAI</option>
             <option value="deepseek">DeepSeek</option>
-            <option value="qwen">Qwen / DashScope</option>
-            <option value="moonshot">Moonshot</option>
-            <option value="zhipu">智谱</option>
+            <option value="qwen">阿里通义 Qwen</option>
+            <option value="moonshot">月之暗面 Moonshot</option>
+            <option value="zhipu">智谱 GLM</option>
             <option value="siliconflow">SiliconFlow</option>
           </optgroup>
         </select>
       </div>
       <div>
-        <label class="block text-sm font-medium text-slate-700 mb-1">Model ID</label>
+        <label class="block text-sm font-medium text-slate-700 mb-1">模型名</label>
         <input x-model="model" type="text"
           class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono"
-          placeholder="例: gemini-2.5-pro / claude-opus-4-7 / gpt-4o">
+          placeholder="例:gemini-2.5-pro / claude-opus-4-7 / gpt-4o">
         <p class="text-xs text-slate-400 mt-1" x-text="example"></p>
       </div>
     </div>
 
     <div class="mt-4">
-      <label class="block text-sm font-medium text-slate-700 mb-1">API Key</label>
+      <label class="block text-sm font-medium text-slate-700 mb-1">API 密钥</label>
       <input x-model="apiKey" type="password"
         class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono"
         placeholder="sk-...">
-      <p class="text-xs text-slate-400 mt-1">仅用于本次测试,不会持久化。生产用法走环境变量 T2V_LLM_API_KEY 或 ~/.t2v_promptgen/config.yaml</p>
+      <p class="text-xs text-slate-400 mt-1">只用来这一次测试,不会保存。要长期用就配环境变量 T2V_LLM_API_KEY,或写进 ~/.t2v_promptgen/config.yaml</p>
     </div>
 
     <div class="mt-4">
-      <label class="block text-sm font-medium text-slate-700 mb-1">Base URL(可选,覆盖 profile 默认)</label>
+      <label class="block text-sm font-medium text-slate-700 mb-1">接口地址(可选,留空用默认)</label>
       <input x-model="baseUrl" type="text"
         class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono"
         placeholder="https://yibuapi.com/v1">
@@ -55,7 +55,7 @@
     <div class="mt-6 flex items-center gap-3">
       <button @click="test()" :disabled="testing"
         class="bg-orange-500 hover:bg-orange-600 disabled:bg-slate-300 text-white font-medium px-5 py-2 rounded-lg shadow-sm">
-        <span x-show="!testing">🔌 测试连通性</span>
+        <span x-show="!testing">🔌 测试一下</span>
         <span x-show="testing">连接中...</span>
       </button>
       <a href="/" class="text-sm text-slate-500 hover:underline">返回首页</a>
@@ -65,26 +65,26 @@
       :class="result?.ok ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'">
       <template x-if="result?.ok">
         <div>
-          <div class="text-sm font-bold text-green-900 mb-2">✓ 连通成功</div>
+          <div class="text-sm font-bold text-green-900 mb-2">✓ 连接成功</div>
           <dl class="text-xs grid grid-cols-2 gap-x-4 gap-y-1 text-green-900">
-            <dt class="text-green-700">延迟</dt><dd x-text="result.elapsed_ms + ' ms'"></dd>
-            <dt class="text-green-700">Provider</dt><dd x-text="result.provider"></dd>
-            <dt class="text-green-700">Model</dt><dd class="font-mono" x-text="result.model"></dd>
-            <dt class="text-green-700">Base URL</dt><dd class="font-mono text-xs truncate" x-text="result.base_url || '默认'"></dd>
-            <dt class="text-green-700">Input tokens</dt><dd x-text="result.usage.input_tokens"></dd>
-            <dt class="text-green-700">Output tokens</dt><dd x-text="result.usage.output_tokens"></dd>
-            <dt class="text-green-700">Cost</dt><dd x-text="'$' + result.usage.cost_usd.toFixed(6)"></dd>
-            <dt class="text-green-700">Finish</dt><dd x-text="result.finish_reason"></dd>
+            <dt class="text-green-700">耗时</dt><dd x-text="result.elapsed_ms + ' ms'"></dd>
+            <dt class="text-green-700">服务</dt><dd x-text="result.provider"></dd>
+            <dt class="text-green-700">模型</dt><dd class="font-mono" x-text="result.model"></dd>
+            <dt class="text-green-700">接口地址</dt><dd class="font-mono text-xs truncate" x-text="result.base_url || '默认'"></dd>
+            <dt class="text-green-700">输入 token</dt><dd x-text="result.usage.input_tokens"></dd>
+            <dt class="text-green-700">输出 token</dt><dd x-text="result.usage.output_tokens"></dd>
+            <dt class="text-green-700">费用</dt><dd x-text="'$' + result.usage.cost_usd.toFixed(6)"></dd>
+            <dt class="text-green-700">结束原因</dt><dd x-text="result.finish_reason"></dd>
           </dl>
           <div class="mt-3 pt-3 border-t border-green-200 text-xs">
-            <div class="text-green-700 mb-1">响应预览</div>
+            <div class="text-green-700 mb-1">回复预览</div>
             <pre class="bg-white p-2 rounded text-slate-700" x-text="result.response_preview"></pre>
           </div>
         </div>
       </template>
       <template x-if="result && !result.ok">
         <div>
-          <div class="text-sm font-bold text-red-900 mb-2">✗ 失败(stage: <span x-text="result.stage"></span>)</div>
+          <div class="text-sm font-bold text-red-900 mb-2">✗ 失败(环节:<span x-text="result.stage"></span>)</div>
           <pre class="text-xs bg-white p-2 rounded text-red-900 whitespace-pre-wrap" x-text="result.error"></pre>
           <div x-show="result.elapsed_ms" class="text-xs text-red-700 mt-2">
             耗时 <span x-text="result.elapsed_ms"></span> ms 后失败
@@ -95,16 +95,16 @@
   </div>
 
   <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 text-sm text-slate-700">
-    <h3 class="font-semibold text-slate-900 mb-2">环境变量(持久化)</h3>
+    <h3 class="font-semibold text-slate-900 mb-2">想长期保存?用环境变量</h3>
     <pre class="bg-white border border-slate-200 rounded p-3 text-xs"># 任选一个或多个
 export T2V_LLM_PROVIDER=yibuapi
 export T2V_LLM_MODEL=gemini-2.5-pro
 export T2V_LLM_API_KEY=sk-...
 
-# 或 per-profile
+# 或者按服务分别配
 export T2V_LLM_API_KEY_YIBUAPI=sk-...
 export T2V_LLM_API_KEY_OPENAI=sk-...</pre>
-    <h3 class="font-semibold text-slate-900 mt-4 mb-2">配置文件 (~/.t2v_promptgen/config.yaml)</h3>
+    <h3 class="font-semibold text-slate-900 mt-4 mb-2">或者写配置文件(~/.t2v_promptgen/config.yaml)</h3>
     <pre class="bg-white border border-slate-200 rounded p-3 text-xs">default_provider: yibuapi
 default_model: gemini-2.5-pro
 profiles:
@@ -125,17 +125,17 @@ function llmConfig() {
     baseUrl: '',
     testing: false,
     result: null,
-    example: '例: gemini-2.5-pro / claude-opus-4-7 / gpt-4o',
+    example: '例:gemini-2.5-pro / claude-opus-4-7 / gpt-4o',
     examples: {
-      yibuapi: '中转支持: gemini-2.5-pro, claude-opus-4-7, gpt-4o ...',
-      openai_compat: '任意 OpenAI-compatible endpoint,需手填 base_url',
-      anthropic: '原生 Anthropic: claude-opus-4-7, claude-sonnet-4-5',
-      openai: '原生 OpenAI: gpt-4o, o1, gpt-4o-mini',
-      deepseek: 'deepseek-chat, deepseek-reasoner',
-      qwen: 'qwen2.5-max, qwen-plus',
+      yibuapi: '中转支持:gemini-2.5-pro、claude-opus-4-7、gpt-4o 等',
+      openai_compat: '任意 OpenAI 兼容接口,需自己填接口地址',
+      anthropic: '官方 Anthropic:claude-opus-4-7、claude-sonnet-4-5',
+      openai: '官方 OpenAI:gpt-4o、o1、gpt-4o-mini',
+      deepseek: 'deepseek-chat、deepseek-reasoner、deepseek-v4-pro',
+      qwen: 'qwen2.5-max、qwen-plus',
       moonshot: 'moonshot-v1-8k / -32k / -128k',
-      zhipu: 'glm-4-plus, glm-4-air',
-      siliconflow: 'deepseek-ai/DeepSeek-V3, Qwen/Qwen2.5-72B-Instruct',
+      zhipu: 'glm-4-plus、glm-4-air',
+      siliconflow: 'deepseek-ai/DeepSeek-V3、Qwen/Qwen2.5-72B-Instruct',
     },
     updateExample() {
       this.example = this.examples[this.provider] || '';

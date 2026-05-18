@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}P1 维度迭代 ｜ {{ run.id }}{% endblock %}
+{% block title %}确定评测维度 ｜ {{ run.id }}{% endblock %}
 
 {% block content %}
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -10,12 +10,11 @@
     <div class="bg-white rounded-xl shadow-sm border border-slate-200">
       <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
         <div>
-          <h2 class="text-lg font-bold text-slate-900">评测维度 SL2</h2>
-          <p class="text-xs text-slate-500">该专项能力下需要测的失败模式,评测员将逐项勾选</p>
+          <h2 class="text-lg font-bold text-slate-900">检查项(评测员勾选的细分点)</h2>
+          <p class="text-xs text-slate-500">每条都对应一种可能的"翻车点",评测员看视频时逐项勾"是 / 否"</p>
         </div>
         <div class="text-sm text-slate-600">
-          <span class="font-medium">{{ run.sl2_list|length }}</span> 项
-          <span class="text-slate-400">/ 上限 20</span>
+          共 <span class="font-medium">{{ run.sl2_list|length }}</span> 项
         </div>
       </div>
       <div class="divide-y divide-slate-100">
@@ -25,16 +24,19 @@
             <div class="flex-1">
               <div class="flex items-center gap-2 mb-1">
                 <span class="text-sm font-semibold text-slate-900">{{ sl2.name }}</span>
-                <code class="text-xs bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">{{ sl2.id }}</code>
+                <code class="text-xs bg-slate-100 px-1.5 py-0.5 rounded text-slate-500">{{ sl2.id }}</code>
               </div>
               <p class="text-sm text-slate-600">{{ sl2.description }}</p>
+              {% if sl2.stress_keywords %}
               <div class="mt-2 flex flex-wrap gap-1">
+                <span class="text-xs text-slate-400">易触发关键词:</span>
                 {% for kw in sl2.stress_keywords %}
-                <span class="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded">stress: {{ kw }}</span>
+                <span class="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded">{{ kw }}</span>
                 {% endfor %}
               </div>
+              {% endif %}
               {% if sl2.inherits_from %}
-              <p class="text-xs text-slate-400 mt-1">继承自: {{ sl2.inherits_from|join(", ") }}</p>
+              <p class="text-xs text-slate-400 mt-1">归属上层维度: {{ sl2.inherits_from|join(", ") }}</p>
               {% endif %}
             </div>
           </div>
@@ -46,8 +48,8 @@
     <!-- Axes -->
     <div class="bg-white rounded-xl shadow-sm border border-slate-200">
       <div class="px-6 py-4 border-b border-slate-200">
-        <h2 class="text-lg font-bold text-slate-900">测试变量 Axes</h2>
-        <p class="text-xs text-slate-500">正交测试变量,笛卡尔积决定最小覆盖矩阵</p>
+        <h2 class="text-lg font-bold text-slate-900">测试变量(每条用例会变化的条件)</h2>
+        <p class="text-xs text-slate-500">不同条件组合会触发不同的翻车点,变量越多覆盖越全</p>
       </div>
       <div class="divide-y divide-slate-100">
         {% for axis in run.axes %}
@@ -66,9 +68,10 @@
         {% endfor %}
       </div>
       <div class="px-6 py-3 bg-slate-50 border-t border-slate-200 text-xs text-slate-600">
-        笛卡尔积 = {% set product = namespace(v=1) %}{% for a in run.axes %}{% set product.v = product.v * a.values|length %}{% endfor %}{{ product.v }} 组合 →
-        <span class="font-medium">目标 Set 大小: {{ run.target_set_size }}</span>
-        (= max(40, 笛卡尔积 × 1.5),上限 120)
+        共
+        {% set product = namespace(v=1) %}{% for a in run.axes %}{% set product.v = product.v * a.values|length %}{% endfor %}
+        <span class="font-medium">{{ product.v }}</span> 种条件组合 →
+        计划生成 <span class="font-medium text-orange-600">{{ run.target_set_size }}</span> 条测试用例
       </div>
     </div>
   </div>
@@ -78,43 +81,40 @@
 
     <div class="bg-orange-50 border border-orange-200 rounded-xl p-5">
       <div class="flex items-center justify-between mb-2">
-        <h3 class="text-sm font-bold text-orange-900">第 {{ run.p1_round + 1 }} 轮 / 共 {{ run.p1_max_rounds }} 轮</h3>
+        <h3 class="text-sm font-bold text-orange-900">第 {{ run.p1_round + 1 }} 轮 / 最多 {{ run.p1_max_rounds }} 轮</h3>
         <div class="text-xs text-orange-700">
-          {% set bars = run.p1_max_rounds %}
-          {% for i in range(bars) %}
-            {% if i < run.p1_round %}●{% elif i == run.p1_round %}○{% else %}·{% endif %}
-          {% endfor %}
+          {% for i in range(run.p1_max_rounds) %}{% if i < run.p1_round %}●{% elif i == run.p1_round %}○{% else %}·{% endif %}{% endfor %}
         </div>
       </div>
-      <p class="text-xs text-orange-800">维度满意 → 点击 <b>确认进入下一步</b>。需要调整 → 在反馈框写明,点击 <b>重新生成</b>。</p>
+      <p class="text-xs text-orange-800">检查项 / 变量列表满意 → 点 <b>确认</b>。要调整 → 在下面写意见 → 点 <b>重新生成</b>。</p>
     </div>
 
     <form method="POST" action="/runs/{{ run.id }}/p1/regenerate" class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-3">
-      <h3 class="text-sm font-semibold text-slate-900">反馈意见(可选)</h3>
+      <h3 class="text-sm font-semibold text-slate-900">想怎么调整?(可选)</h3>
       <textarea name="free_text" rows="6"
         class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
         placeholder="例:
-- 加一个测手部速度一致性的维度
-- 删除 hand_skin_quality
-- 把'操作复杂度'轴增加'三指协同'值
-- 想多测一些手部遮挡的情况"></textarea>
+- 加一个测手指运动速度一致性的检查项
+- 把'手指数量'拆成'多指'和'缺指'两项
+- 在测试变量里加上'是否有手套'
+- 想多测复杂操作场景"></textarea>
       <button type="submit" class="w-full bg-slate-700 hover:bg-slate-800 text-white font-medium px-4 py-2 rounded-lg text-sm">
-        重新生成维度
+        重新生成
       </button>
     </form>
 
     <form method="POST" action="/runs/{{ run.id }}/p1/confirm">
       <button type="submit" class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold px-4 py-3 rounded-lg shadow-sm">
-        ✓ 确认维度,进入 Prompt 生成
+        ✓ 确认,开始生成测试用例
       </button>
     </form>
 
     <div class="bg-white rounded-xl border border-slate-200 p-4 text-xs text-slate-600">
-      <h4 class="font-semibold text-slate-700 mb-2">生成规则</h4>
+      <h4 class="font-semibold text-slate-700 mb-2">接下来怎么走</h4>
       <ul class="space-y-1">
-        <li>• 难度比例:中 60% / 难 40%</li>
-        <li>• Stress case:占比 30%</li>
-        <li>• 双语 prompt(中 + 英)</li>
+        <li>• 难度搭配:中等 60% / 困难 40%</li>
+        <li>• 故意刁难的用例约 30%</li>
+        <li>• 每条都有中英对照</li>
         <li>• 评测员说明书自动生成</li>
       </ul>
     </div>
