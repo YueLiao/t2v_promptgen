@@ -2,6 +2,18 @@
 {% block title %}确定评测维度 ｜ {{ run.id }}{% endblock %}
 
 {% block content %}
+{% if last_error %}
+<div class="mb-4 bg-amber-50 border border-amber-300 rounded-lg p-4">
+  <div class="flex items-start gap-3">
+    <span class="text-amber-600 text-xl">⚠</span>
+    <div class="flex-1">
+      <h3 class="text-sm font-bold text-amber-900">AI 调用没成功,用了示例模板兜底</h3>
+      <p class="text-xs text-amber-800 mt-1">下面看到的检查项是按你描述的关键词匹配的预置模板。要让 AI 真的生成,请确认 API 密钥已填,然后点"重新生成"。</p>
+      <p class="text-xs text-amber-700 mt-2 font-mono break-all">{{ last_error }}</p>
+    </div>
+  </div>
+</div>
+{% endif %}
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
   <!-- Left: SL2 list -->

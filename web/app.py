@@ -115,6 +115,9 @@ def _try_real_qa(run_id: str, run: Run):
 # Run-level QA reports (in-memory, not persisted)
 RUN_QA_REPORTS: dict[str, dict] = {}
 
+# Last error per run (surfaced in dimensions/review pages so silent fallbacks are visible)
+RUN_LAST_ERROR: dict[str, str] = {}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -225,16 +228,18 @@ async def create_run(
             "base_url": base_url or None,
         }
 
-    # Try real LLM, fall back to mock
+    # Try real LLM, fall back to mock — log loudly so silent failures are visible
     try:
         run.sl2_list, run.axes = _try_real_dimensions(run_id, run)
     except Exception as exc:
+        import traceback
+        err = f"[P1 LLM 调用失败 → 走 mock] slug={slug}  {type(exc).__name__}: {exc}"
+        print(err, flush=True)
+        traceback.print_exc()
+        RUN_LAST_ERROR[run_id] = err
         run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
             description, round=0, capability_slug=slug
         )
-        # Mark in decisions_log (visible in API)
-        if hasattr(run, "decisions_log"):
-            pass  # decisions_log lives in CapabilityVersion, not Run
 
     # Compute target set size from axes (decision C3)
     from ..phases.dimensions import compute_min_set_size
@@ -260,6 +265,9 @@ async def view_run(request: Request, run_id: str):
         from .mock_data import compute_coverage_matrix
         extra["coverage"] = compute_coverage_matrix(run.prompts, run.sl2_list, run.axes)
         extra["qa_report"] = RUN_QA_REPORTS.get(run_id, {})
+
+    if RUN_LAST_ERROR.get(run_id):
+        extra["last_error"] = RUN_LAST_ERROR[run_id]
 
     return templates.TemplateResponse(request, template, _ctx(run, **extra))
 

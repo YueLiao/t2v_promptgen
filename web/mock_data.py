@@ -13,16 +13,26 @@ from ..core.schema import SL2, Axis, PromptEntry
 
 
 def mock_slug_for(description: str) -> str:
-    """Naive slug extraction. Real impl uses LLM."""
+    """Naive slug extraction. Real impl uses LLM.
+
+    Checked in order — more specific keywords first so a passing mention of
+    "物理碰撞" in a temporal description doesn't get classified as physics.
+    """
     d = description.lower()
-    if "人手" in description or "hand" in d:
+    # Temporal / 时序 wins over everything else if explicit
+    if "时序" in description or "temporal" in d or "动作顺序" in description \
+       or "因果链" in description or "时间序列" in description:
+        return "temporal_consistency"
+    if "人手" in description or "hand" in d or "手指" in description:
         return "human_hand"
-    if "人体" in description or "body" in d:
+    if "人体" in description or "body" in d or "人物动作" in description:
         return "human_body"
-    if "运镜" in description or "camera" in d:
+    if "运镜" in description or "camera" in d or "镜头" in description:
         return "camera_motion"
-    if "物理" in description or "physic" in d:
+    if "物理" in description or "physic" in d or "碰撞" in description or "重力" in description:
         return "physics"
+    if "文字" in description or "text" in d or "招牌" in description:
+        return "text_rendering"
     return "custom_capability"
 
 
@@ -107,11 +117,47 @@ _PHYSICS_AXES_SEED = [
     ("环境", ["真空", "重力下", "水下"]),
 ]
 
+_TEMPORAL_SL2_SEED = [
+    ("temp_action_order", "多段动作顺序错乱",
+     "三段以上动作未按 prompt 指定顺序完成,如 A→B→C 被生成成 A→C→B",
+     ["先...然后", "依次", "顺序"]),
+    ("temp_step_missing", "步骤缺失或跳过",
+     "prompt 指定的中间动作被略过,只生成首尾或截断在首段",
+     ["完整", "三段", "最后"]),
+    ("temp_causal_break", "因果链断裂",
+     "做完动作后应有的物理/逻辑结果未发生,如推下杯子未碎、扔球未落地",
+     ["导致", "接着", "然后"]),
+    ("temp_irreversibility", "连续变化的不可逆性失败",
+     "应单向推进的过程出现回退,如冰融了又结回、纸折了又自动展开",
+     ["融化", "燃烧", "折叠"]),
+    ("temp_occlusion_consistency", "遮挡前后主体一致性",
+     "主体经过遮挡物前后,衣着 / 持物 / 姿态发生突变",
+     ["走过", "挡住", "再露出"]),
+    ("temp_speed_fidelity", "速度感失真",
+     "慢动作没慢下来、瞬间反应被拖长,或加速镜头节奏不均匀",
+     ["慢动作", "瞬间", "加速"]),
+    ("temp_state_memory", "状态记忆失败",
+     "已发生的不可逆状态被遗忘,如倒下的人自己站起、熄灭的火自燃",
+     ["已经", "保持", "继续"]),
+    ("temp_sync_failure", "多主体同步失败",
+     "两人需同时完成的动作(握手 / 碰杯 / 击掌)时间错位",
+     ["同时", "碰杯", "击掌"]),
+]
+
+_TEMPORAL_AXES_SEED = [
+    ("动作段数", ["2 段", "3 段", "4 段以上"]),
+    ("因果类型", ["物理碰撞", "物体形变", "生物动作"]),
+    ("镜头切换", ["单镜到底", "1 次切换"]),
+    ("主体数", ["单人", "两人交互"]),
+    ("速度类型", ["慢动作", "正常", "快速"]),
+]
+
 _CAPABILITY_TEMPLATES = {
     "human_hand": (_HAND_SL2_SEED, _HAND_AXES_SEED),
     "human_body": (_BODY_SL2_SEED, _BODY_AXES_SEED),
     "camera_motion": (_CAMERA_SL2_SEED, _CAMERA_AXES_SEED),
     "physics": (_PHYSICS_SL2_SEED, _PHYSICS_AXES_SEED),
+    "temporal_consistency": (_TEMPORAL_SL2_SEED, _TEMPORAL_AXES_SEED),
 }
 
 
@@ -142,11 +188,22 @@ def generate_mock_dimensions(description: str, round: int = 0,
     if round >= 3:
         sl2_data = sl2_data[:7]  # mock: trim to top 7 in later rounds
 
+    # Choose a sensible upper-dimension hint based on slug
+    _INHERIT_BY_SLUG = {
+        "human_hand": "物理规律与常识:人手/脸/体结构畸形",
+        "human_body": "物理规律与常识:人手/脸/体结构畸形",
+        "camera_motion": "指令遵循:镜头运动",
+        "physics": "物理规律与常识:刚体/流体/形变",
+        "temporal_consistency": "指令遵循:多步动作 + 时序",
+        "text_rendering": "文字渲染:字符正确性",
+    }
+    inherit = _INHERIT_BY_SLUG.get(capability_slug, "指令遵循:通用")
+
     sl2_list = [
         SL2(
             id=sid,
             name=name,
-            inherits_from=["物理规律与常识:人手/脸/体结构畸形"],
+            inherits_from=[inherit],
             description=desc,
             judging_criteria_md=f"## 判定为 Yes 的条件\n- {desc}\n\n## 判定为 No 的情况\n- 主体未出现\n- 无法判定",
             stress_keywords=kw,
