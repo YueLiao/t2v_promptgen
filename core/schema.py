@@ -124,6 +124,12 @@ class PromptEntry(BaseModel):
     prompt_zh: str
     prompt_en: str
 
+    # Concrete scene grounding (from L3/L4 tag library; v0.8+)
+    scene_l1: str | None = None
+    scene_l2: str | None = None
+    scene_l3: str | None = None
+    scene_l4: str | None = None
+
     generated_at: datetime
     generation_round: int = 1                # incremented on regen
 
