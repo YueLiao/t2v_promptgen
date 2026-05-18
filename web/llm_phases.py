@@ -198,8 +198,8 @@ def generate_prompts_real(
         n = min(batch_size, target_size - len(all_prompts))
         start_idx = len(all_prompts) + 1
 
-        # Sample concrete scenes for this batch
-        scenes = library.sample_diverse(scenes_per_batch)
+        # Sample concrete scenes for this batch — adapted to capability if known
+        scenes = library.sample_for_capability(capability, scenes_per_batch)
         scenes_md = "\n".join(
             f"- {{l1:{t.l1}, l2:{t.l2}, l3:{t.l3}" +
             (f", l4:{t.l4}" if t.l4 else "") + "}"
