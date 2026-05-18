@@ -133,6 +133,40 @@ class PromptEntry(BaseModel):
     generated_at: datetime
     generation_round: int = 1                # incremented on regen
 
+    # ---- QA results (populated by P3; None/empty before P3 ran) ----
+    qa_rule_errors: list[str] = Field(
+        default_factory=list,
+        description="Deterministic rule violations: length / banned terms / missing fields"
+    )
+    qa_naturalness_zh: int | None = Field(
+        default=None,
+        description="LLM-judged Chinese naturalness 0-10, threshold 7"
+    )
+    qa_naturalness_en: int | None = Field(
+        default=None,
+        description="LLM-judged English naturalness 0-10, threshold 7"
+    )
+    qa_naturalness_issues: list[str] = Field(
+        default_factory=list,
+        description="Short notes from naturalness judge"
+    )
+    qa_judged_sl2: list[str] = Field(
+        default_factory=list,
+        description="SL2 ids the LLM judge independently thinks this prompt covers"
+    )
+    qa_coverage_match: bool | None = Field(
+        default=None,
+        description="True iff judged_sl2 overlaps declared sl2_covered"
+    )
+    qa_passed: bool = Field(
+        default=True,
+        description="Aggregate pass flag (rules empty AND naturalness ≥7 AND coverage match)"
+    )
+    needs_human_review: bool = Field(
+        default=False,
+        description="QA flagged but kept; review page highlights it for the human"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Run state

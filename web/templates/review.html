@@ -4,6 +4,63 @@
 {% block content %}
 <div class="space-y-6">
 
+  <!-- QA report panel -->
+  {% if qa_report and qa_report.get("total") %}
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200">
+    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+      <div>
+        <h2 class="text-lg font-bold text-slate-900">自动质检结果</h2>
+        <p class="text-xs text-slate-500">
+          {% if qa_report.judges_ran %}规则检查 + 自然度评分 + 检查项反核{% else %}仅规则检查(无 API key,跳过了 AI 复审){% endif %}
+        </p>
+      </div>
+      <form method="POST" action="/runs/{{ run.id }}/p4/rerun_qa">
+        <button type="submit" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg">↻ 重跑质检</button>
+      </form>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-0 divide-x divide-slate-100">
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">通过率</div>
+        <div class="text-2xl font-bold mt-0.5
+          {% if qa_report.pass_rate >= 0.9 %}text-green-600
+          {% elif qa_report.pass_rate >= 0.7 %}text-orange-500
+          {% else %}text-red-600{% endif %}">
+          {{ "%.0f"|format(qa_report.pass_rate * 100) }}%
+        </div>
+        <div class="text-xs text-slate-400 mt-0.5">{{ qa_report.passed }}/{{ qa_report.total }}</div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">规则不过</div>
+        <div class="text-2xl font-bold text-slate-800 mt-0.5">{{ qa_report.fail_rules or 0 }}</div>
+        <div class="text-xs text-slate-400 mt-0.5">长度/禁词/字段</div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">自然度低于 7</div>
+        <div class="text-2xl font-bold text-slate-800 mt-0.5">{{ qa_report.fail_naturalness or 0 }}</div>
+        <div class="text-xs text-slate-400 mt-0.5">
+          {% if qa_report.judges_ran %}
+            中 {{ qa_report.naturalness_zh_avg }} ／ 英 {{ qa_report.naturalness_en_avg }}
+          {% else %}—{% endif %}
+        </div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">检查项反核不一致</div>
+        <div class="text-2xl font-bold text-slate-800 mt-0.5">{{ qa_report.fail_coverage or 0 }}</div>
+        <div class="text-xs text-slate-400 mt-0.5">AI 判断 ≠ 自报</div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">未被覆盖的检查项</div>
+        <div class="text-2xl font-bold {% if qa_report.sl2_uncovered %}text-red-600{% else %}text-green-600{% endif %} mt-0.5">
+          {{ qa_report.sl2_uncovered|length }}
+        </div>
+        <div class="text-xs text-slate-400 mt-0.5 truncate" title="{{ qa_report.sl2_uncovered|join(', ') }}">
+          {% if qa_report.sl2_uncovered %}{{ qa_report.sl2_uncovered|join(', ') }}{% else %}全部命中{% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Stats overview -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
@@ -95,10 +152,17 @@
         </thead>
         <tbody class="divide-y divide-slate-100">
           {% for p in run.prompts %}
-          <tr class="hover:bg-slate-50" x-data="{ expanded: false }">
+          <tr class="hover:bg-slate-50 {% if p.needs_human_review %}bg-amber-50{% endif %}" x-data="{ expanded: false }">
             <td class="px-4 py-2 text-xs font-mono align-top">
-              {{ p.id }}
-              {% if p.is_stress %}<span class="ml-1 inline-block bg-orange-100 text-orange-700 px-1 rounded text-xs">刁难</span>{% endif %}
+              <div class="flex items-center gap-1 flex-wrap">
+                <span>{{ p.id }}</span>
+                {% if p.qa_passed %}
+                  <span class="inline-block bg-green-100 text-green-700 px-1 rounded text-xs" title="质检通过">✓</span>
+                {% else %}
+                  <span class="inline-block bg-amber-100 text-amber-700 px-1 rounded text-xs" title="质检未通过 — 见展开内容">⚠</span>
+                {% endif %}
+                {% if p.is_stress %}<span class="inline-block bg-orange-100 text-orange-700 px-1 rounded text-xs">刁难</span>{% endif %}
+              </div>
             </td>
             <td class="px-4 py-2 align-top">
               {% if p.difficulty == "hard" %}
@@ -123,6 +187,36 @@
               <div x-show="expanded" x-cloak class="mt-1 text-xs text-slate-400">
                 条件: {% for k, v in p.axes_values.items() %}<span class="mr-2">{{ k }}={{ v }}</span>{% endfor %}
               </div>
+              {% if p.qa_rule_errors or p.qa_naturalness_zh is not none or p.qa_judged_sl2 %}
+              <div x-show="expanded" x-cloak class="mt-2 pt-2 border-t border-slate-200 text-xs space-y-1">
+                {% if p.qa_rule_errors %}
+                <div class="text-red-600">
+                  <span class="font-medium">规则错误:</span> {{ p.qa_rule_errors|join('; ') }}
+                </div>
+                {% endif %}
+                {% if p.qa_naturalness_zh is not none %}
+                <div class="text-slate-500">
+                  <span class="font-medium">自然度:</span>
+                  中
+                  <span class="{% if p.qa_naturalness_zh >= 7 %}text-green-700{% else %}text-red-600{% endif %} font-medium">{{ p.qa_naturalness_zh }}</span>
+                  ／英
+                  <span class="{% if p.qa_naturalness_en >= 7 %}text-green-700{% else %}text-red-600{% endif %} font-medium">{{ p.qa_naturalness_en }}</span>
+                  {% if p.qa_naturalness_issues %}<span class="text-slate-400">— {{ p.qa_naturalness_issues|join('; ') }}</span>{% endif %}
+                </div>
+                {% endif %}
+                {% if p.qa_judged_sl2 %}
+                <div class="text-slate-500">
+                  <span class="font-medium">AI 反核覆盖:</span>
+                  {% for sid in p.qa_judged_sl2 %}<span class="inline-block bg-slate-100 px-1 rounded mr-1">{{ sid }}</span>{% endfor %}
+                  {% if p.qa_coverage_match == false %}
+                  <span class="text-red-600 ml-1">⚠ 与自报不一致</span>
+                  {% elif p.qa_coverage_match %}
+                  <span class="text-green-700 ml-1">✓ 与自报一致</span>
+                  {% endif %}
+                </div>
+                {% endif %}
+              </div>
+              {% endif %}
             </td>
             <td class="px-4 py-2 align-top text-right whitespace-nowrap">
               <button @click="expanded = !expanded" class="text-xs text-slate-500 hover:text-slate-800 mr-2" x-text="expanded ? '收起' : '展开'">展开</button>

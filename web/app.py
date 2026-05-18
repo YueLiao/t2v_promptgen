@@ -86,6 +86,36 @@ def _try_real_prompts(run_id: str, run: Run):
         client=client,
     )
 
+
+def _try_real_qa(run_id: str, run: Run):
+    """Try LLM-backed QA. Returns QAReport (rules-only report if no creds).
+
+    Always mutates run.prompts in place by populating qa_* fields. The phase 3
+    function is tolerant — if the client errors mid-batch, scores stay None
+    and prompts default to "passed by rules".
+    """
+    creds = RUN_CREDS.get(run_id)
+    client = None
+    if creds and creds.get("api_key"):
+        # Use the P2 (cheaper) model for judges — they're simple classifiers
+        client = llm_phases.build_client(
+            provider=creds["provider"],
+            model=creds.get("model_p2") or creds["model"],
+            api_key=creds["api_key"],
+            base_url=creds.get("base_url") or None,
+        )
+    return llm_phases.run_qa_real(
+        prompts=run.prompts,
+        sl2_list=run.sl2_list,
+        axes=run.axes,
+        client=client,
+    )
+
+
+# Run-level QA reports (in-memory, not persisted)
+RUN_QA_REPORTS: dict[str, dict] = {}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -104,6 +134,7 @@ PHASE_ORDER = [
     Phase.P0_INTAKE,
     Phase.P1_DIMENSIONS,
     Phase.P2_PROMPTS,
+    Phase.P3_QA,
     Phase.P4_REVIEW,
     Phase.P5_EXPORT,
 ]
@@ -228,6 +259,7 @@ async def view_run(request: Request, run_id: str):
     if run.phase == Phase.P4_REVIEW:
         from .mock_data import compute_coverage_matrix
         extra["coverage"] = compute_coverage_matrix(run.prompts, run.sl2_list, run.axes)
+        extra["qa_report"] = RUN_QA_REPORTS.get(run_id, {})
 
     return templates.TemplateResponse(request, template, _ctx(run, **extra))
 
@@ -264,8 +296,9 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
 @app.post("/runs/{run_id}/p1/confirm")
 async def p1_confirm(run_id: str):
     run = _get_run(run_id)
+
+    # ---- P2: generate prompts ----
     run.phase = Phase.P2_PROMPTS
-    # Try real LLM, fall back to mock
     try:
         run.prompts = _try_real_prompts(run_id, run)
         if not run.prompts:
@@ -274,8 +307,55 @@ async def p1_confirm(run_id: str):
         run.prompts = mock_data.generate_mock_prompts(
             run.sl2_list, run.axes, run.target_set_size or 60
         )
-    # Skip P3 in mock; go straight to review
+
+    # ---- P3: QA gate (rules + LLM naturalness + coverage audit) ----
+    run.phase = Phase.P3_QA
+    try:
+        report = _try_real_qa(run_id, run)
+        RUN_QA_REPORTS[run_id] = {
+            "total": report.total,
+            "passed": report.passed,
+            "pass_rate": report.pass_rate,
+            "fail_rules": report.fail_rules,
+            "fail_naturalness": report.fail_naturalness,
+            "fail_coverage": report.fail_coverage,
+            "naturalness_zh_avg": round(report.naturalness_zh_avg, 1),
+            "naturalness_en_avg": round(report.naturalness_en_avg, 1),
+            "stress_ratio": round(report.stress_ratio, 2),
+            "sl2_uncovered": report.sl2_uncovered,
+            "judges_ran": report.judges_ran,
+        }
+    except Exception as e:
+        # QA failed entirely — log but don't block the user
+        RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
+
+    # ---- P4: hand off to human review ----
     run.phase = Phase.P4_REVIEW
+    run.updated_at = datetime.now()
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+@app.post("/runs/{run_id}/p4/rerun_qa")
+async def p4_rerun_qa(run_id: str):
+    """Re-run the QA pass on the current prompts. Useful after user edits."""
+    run = _get_run(run_id)
+    try:
+        report = _try_real_qa(run_id, run)
+        RUN_QA_REPORTS[run_id] = {
+            "total": report.total,
+            "passed": report.passed,
+            "pass_rate": report.pass_rate,
+            "fail_rules": report.fail_rules,
+            "fail_naturalness": report.fail_naturalness,
+            "fail_coverage": report.fail_coverage,
+            "naturalness_zh_avg": round(report.naturalness_zh_avg, 1),
+            "naturalness_en_avg": round(report.naturalness_en_avg, 1),
+            "stress_ratio": round(report.stress_ratio, 2),
+            "sl2_uncovered": report.sl2_uncovered,
+            "judges_ran": report.judges_ran,
+        }
+    except Exception as e:
+        RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
     run.updated_at = datetime.now()
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 

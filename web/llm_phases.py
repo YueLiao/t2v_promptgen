@@ -12,6 +12,7 @@ from typing import Any
 from ..core.schema import Axis, PromptEntry, SL2
 from ..llm.base import LLMClient, make_client
 from ..llm.providers import openai_compat, anthropic_client  # register
+from ..phases.qa import run as run_qa_phase, QAReport
 
 
 # ---------------------------------------------------------------------------
@@ -325,3 +326,24 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
             # Batch failed; bail with whatever we have
             break
     return all_prompts
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — QA (real, batched LLM judges)
+# ---------------------------------------------------------------------------
+
+def run_qa_real(
+    prompts: list[PromptEntry],
+    sl2_list: list[SL2],
+    axes: list[Axis],
+    client: LLMClient | None = None,
+) -> QAReport:
+    """Wrap phases.qa.run with the same error-tolerant pattern as the others.
+
+    Mutates `prompts` in place: each gets qa_* fields populated. Returns a
+    set-level QAReport.
+
+    If `client` is None or every LLM judge call fails, deterministic rules
+    still run; LLM-tier scores stay None and prompts pass if rules pass.
+    """
+    return run_qa_phase(prompts, sl2_list, axes, client=client)
