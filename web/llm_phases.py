@@ -132,6 +132,14 @@ def generate_dimensions_real(
 
 _PROMPTS_SYSTEM = """你是 T2V 评测 prompt 设计专家。给定一组 SL2(失败模式)、axes(测试变量)、"具体场景候选词表"和"本轮多样性配额",生成 N 条 prompt。
 
+# 长度铁律(违反就废)
+
+- **中文 50-100 字**(下限 30 字是死线,30 字以下直接丢弃 — 不要图省事)
+- **英文 18-50 词**(下限 15 词)
+- 不是要凑字数,是要描述清楚:主体特征 + 多段动作 + 时序变化 + 场景细节
+- ❌ 反例(20 字):"狗先向前跑,然后绕过一棵树,接着继续向前跑。" — 缺主体特征 / 树的描述 / 视觉细节
+- ✅ 正例(60 字):"一只金毛犬先沿着林荫小径加速奔跑,接着灵巧地绕过一棵粗壮的橡树,溅起树叶飞舞,最后继续向前冲向林深处。"
+
 # 视频特性铁律(违反就废)
 
 T2V 生成的是 **5 秒视频**,不是静态图。每条 prompt 都必须描述**有动作、有时序**的画面。
@@ -354,11 +362,13 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
 
 请生成 {n} 条 prompt,id 从 spec_{capability}_{start_idx:03d} 开始递增。
 要求:
-- 每条 prompt 显式选 subject_type,按上面的【多样性进度】倾斜
+- **每条中文 50-100 字,英文 18-50 词**(< 30 字会被丢弃,别图省事)
+- 每条 prompt 显式选 subject_type 和 subject_count,按上面【多样性进度】倾斜
 - 难度 medium 60% / hard 40%;is_stress 约 30%(stress 必须组合 ≥2 种刁难,不只是"更难")
 - hard 难度的至少满足 system prompt 里"hard 标准"的 2 项
 - 多样化:同一 L3 场景一批最多 2 次,同一动作动词一批最多 3 次
 - 不要重复 SL2 × axes 组合
+- sl2_covered 要诚实 — 实际测什么就写什么,不要为了"覆盖多 SL2"乱填(后面有 LLM 反核)
 - 严禁抽象词、判定标准、静态描述
 """
         try:
@@ -380,6 +390,14 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
             for item in data.get("prompts", []):
                 try:
                     prompt_zh = item["prompt_zh"]
+
+                    # Length gate: catches the LLM trying to save tokens
+                    prompt_en = item.get("prompt_en", "")
+                    if not (30 <= len(prompt_zh) <= 120):
+                        continue
+                    en_words = len(prompt_en.split())
+                    if not (15 <= en_words <= 60):
+                        continue
 
                     # Dynamic-quality gate: reject prompts that describe a still image
                     motion_hits = count_kw(prompt_zh, MOTION_VERB_KW)
