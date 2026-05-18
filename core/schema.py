@@ -130,6 +130,17 @@ class PromptEntry(BaseModel):
     scene_l3: str | None = None
     scene_l4: str | None = None
 
+    # Subject categorization for diversity enforcement
+    # human / animal / object / vehicle / natural_phenomenon / abstract_effect
+    subject_type: str | None = Field(
+        default=None,
+        description="Coarse subject category used to enforce cross-batch diversity"
+    )
+
+    # Self-declared motion verbs and temporal markers (also used by P3 gate)
+    motion_verbs: list[str] = Field(default_factory=list)
+    temporal_markers: list[str] = Field(default_factory=list)
+
     generated_at: datetime
     generation_round: int = 1                # incremented on regen
 

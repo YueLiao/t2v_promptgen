@@ -59,15 +59,30 @@ def count_kw(text: str, kw_set: set[str]) -> int:
 
 
 def score(prompt_zh: str, action_count: int, subject_count: int,
-          axes_values: dict | None = None) -> float:
+          axes_values: dict | None = None,
+          sl2_covered: list[str] | None = None) -> float:
     """Compute heuristic difficulty score from prompt content + metadata."""
     s = 0.0
     s += action_count * 1.0
     s += subject_count * 0.5
 
-    # Temporal / dynamic rewards (capped to prevent runaway)
-    s += min(count_kw(prompt_zh, TEMPORAL_KW), 4) * 0.5
-    s += min(count_kw(prompt_zh, MOTION_VERB_KW), 4) * 0.5
+    # Multi-subject bonus (above the first)
+    if subject_count >= 2:
+        s += 1.5 * (subject_count - 1)
+
+    # Cross-SL2 coverage bonus: testing 2+ SL2 in one prompt = harder
+    if sl2_covered and len(sl2_covered) >= 2:
+        s += 1.0 * (len(sl2_covered) - 1)
+
+    # Temporal / dynamic rewards (capped)
+    temporal_hits = count_kw(prompt_zh, TEMPORAL_KW)
+    motion_hits = count_kw(prompt_zh, MOTION_VERB_KW)
+    s += min(temporal_hits, 5) * 0.5
+    s += min(motion_hits, 5) * 0.5
+
+    # Bonus for ≥3 temporal markers (real multi-step description)
+    if temporal_hits >= 3:
+        s += 1.0
 
     # Static-signal penalty
     if any(k in prompt_zh for k in STATIC_KW):
@@ -84,16 +99,18 @@ def score(prompt_zh: str, action_count: int, subject_count: int,
     if any(k in prompt_zh for k in OCCLUSION_KW):
         s += 1.0
     if axes_values:
-        # Crude: more axes-values present → harder. Tune later.
         s += 0.5 * len(axes_values)
     return s
 
 
 def to_band(s: float) -> str:
-    """Map score to difficulty band. easy is allowed in output but B=0:3:2
-    forbids easy from being targeted in P2."""
-    if s < 2:
+    """Map score to difficulty band.
+
+    Raised thresholds (v0.7): more prompts need genuine complexity to reach
+    hard.  s<3 = easy (rejected), 3≤s<6 = medium, s≥6 = hard.
+    """
+    if s < 3:
         return "easy"
-    if s < 5:
+    if s < 6:
         return "medium"
     return "hard"
