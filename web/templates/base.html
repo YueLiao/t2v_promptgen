@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}t2v_promptgen{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+    .phase-pill { transition: all 0.2s; }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+<nav class="bg-slate-900 text-white">
+  <div class="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
+    <a href="/" class="text-lg font-semibold tracking-wide flex items-center gap-2">
+      <span class="text-orange-400">●</span>
+      t2v_promptgen
+      <span class="text-xs text-slate-400 font-normal">v0.6 prototype</span>
+    </a>
+    <div class="text-sm text-slate-300">
+      <a href="/" class="hover:text-white">所有 Run</a>
+    </div>
+  </div>
+</nav>
+
+{% if run is defined %}
+<div class="bg-white border-b border-slate-200">
+  <div class="max-w-7xl mx-auto px-6 py-4">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <h1 class="text-xl font-bold text-slate-900">{{ run.capability_slug }}</h1>
+        <p class="text-sm text-slate-500">Run ID: <code class="bg-slate-100 px-1 rounded">{{ run.id }}</code> · 创建于 {{ run.created_at.strftime("%Y-%m-%d %H:%M") }}</p>
+      </div>
+      <div class="text-sm text-slate-600">
+        Provider: <span class="font-mono text-slate-800">{{ run.provider }}</span> /
+        <span class="font-mono text-slate-800">{{ run.model }}</span>
+      </div>
+    </div>
+    <!-- Phase tracker -->
+    <div class="flex items-center gap-2 mt-2">
+      {% for phase in phase_order %}
+      <div class="flex items-center">
+        <div class="phase-pill px-3 py-1 rounded-full text-xs font-medium
+          {% if run.phase.value == phase.value %}
+            bg-orange-500 text-white shadow
+          {% elif phase_order.index(phase) < phase_order.index(run.phase) %}
+            bg-green-100 text-green-800
+          {% else %}
+            bg-slate-100 text-slate-500
+          {% endif %}">
+          {{ phase_label[phase] }}
+        </div>
+        {% if not loop.last %}
+        <div class="w-6 h-px bg-slate-300 mx-1"></div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<main class="max-w-7xl mx-auto px-6 py-8">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="mt-12 py-6 text-center text-xs text-slate-400">
+  T2V Benchmark Suite · 专项能力 Prompt 自动生产
+</footer>
+
+</body>
+</html>

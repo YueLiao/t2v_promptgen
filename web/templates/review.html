@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}P4 审核 ｜ {{ run.id }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <!-- Stats overview -->
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">总条目</div>
+      <div class="text-3xl font-bold text-slate-900 mt-1">{{ coverage.total }}</div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">难度分布</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-lg font-bold text-blue-600">中 {{ coverage.difficulty.medium }}</span>
+        <span class="text-slate-400">·</span>
+        <span class="text-lg font-bold text-red-600">难 {{ coverage.difficulty.hard }}</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-1">目标 60% / 40%</div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">Stress Case</div>
+      <div class="text-3xl font-bold text-orange-600 mt-1">{{ coverage.stress_count }}</div>
+      <div class="text-xs text-slate-400 mt-1">{{ "%.1f"|format(coverage.stress_ratio * 100) }}% / 目标 30%</div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">SL2 覆盖</div>
+      {% set covered_sl2 = (coverage.sl2_hit_counts.values()|select|list)|length %}
+      <div class="text-3xl font-bold text-green-600 mt-1">{{ covered_sl2 }}/{{ run.sl2_list|length }}</div>
+    </div>
+  </div>
+
+  <!-- Charts row -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+      <h3 class="text-sm font-bold text-slate-900 mb-3">SL2 覆盖热图</h3>
+      <div class="space-y-1.5">
+        {% for sl2 in run.sl2_list %}
+        {% set count = coverage.sl2_hit_counts.get(sl2.id, 0) %}
+        <div class="flex items-center gap-3 text-xs">
+          <div class="w-40 truncate text-slate-700" title="{{ sl2.name }}">{{ sl2.name }}</div>
+          <div class="flex-1 bg-slate-100 rounded h-5 relative overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-orange-400 to-orange-500" style="width: {{ (count * 8)|round }}%; max-width: 100%;"></div>
+            <span class="absolute inset-0 flex items-center px-2 text-xs font-medium text-slate-700">{{ count }}</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+      <h3 class="text-sm font-bold text-slate-900 mb-3">难度 / Stress 分布</h3>
+      <canvas id="dist-chart" height="200"></canvas>
+    </div>
+  </div>
+
+  <!-- Action row -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div class="md:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <h3 class="text-sm font-bold text-slate-900 mb-2">本轮反馈(可选)</h3>
+      <form method="POST" action="/runs/{{ run.id }}/p4/regenerate" class="space-y-3">
+        <textarea name="free_text" rows="3"
+          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+          placeholder="例:多生成一些遮挡场景的 prompt;手部特写比例不够;某条 prompt 太短"></textarea>
+        <button type="submit" class="bg-slate-700 hover:bg-slate-800 text-white font-medium px-4 py-2 rounded-lg text-sm">
+          重新生成(消耗 1 轮 ｜ 第 {{ run.p4_round + 1 }}/{{ run.p4_max_rounds }})
+        </button>
+      </form>
+    </div>
+    <form method="POST" action="/runs/{{ run.id }}/p4/confirm">
+      <button type="submit" class="w-full h-full bg-orange-500 hover:bg-orange-600 text-white font-bold px-4 rounded-xl shadow-sm text-base">
+        ✓ 确认通过<br>
+        <span class="text-xs font-normal opacity-80">进入导出</span>
+      </button>
+    </form>
+  </div>
+
+  <!-- Prompts table -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+      <h3 class="text-lg font-bold text-slate-900">Prompt 列表</h3>
+      <div class="text-xs text-slate-500">点击 <code class="bg-slate-100 px-1 rounded">编辑</code> 修改单条</div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-xs font-medium text-slate-500 uppercase">
+          <tr>
+            <th class="px-4 py-2 text-left">ID</th>
+            <th class="px-4 py-2 text-left">难度</th>
+            <th class="px-4 py-2 text-left">SL2</th>
+            <th class="px-4 py-2 text-left">Prompt (ZH)</th>
+            <th class="px-4 py-2"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          {% for p in run.prompts %}
+          <tr class="hover:bg-slate-50" x-data="{ expanded: false }">
+            <td class="px-4 py-2 text-xs font-mono align-top">
+              {{ p.id }}
+              {% if p.is_stress %}<span class="ml-1 inline-block bg-orange-100 text-orange-700 px-1 rounded text-xs">stress</span>{% endif %}
+            </td>
+            <td class="px-4 py-2 align-top">
+              {% if p.difficulty == "hard" %}
+                <span class="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-medium">难</span>
+              {% else %}
+                <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-medium">中</span>
+              {% endif %}
+              <div class="text-xs text-slate-400 mt-0.5">{{ "%.1f"|format(p.difficulty_score) }}</div>
+            </td>
+            <td class="px-4 py-2 align-top">
+              <div class="flex flex-wrap gap-1 max-w-[180px]">
+                {% for sid in p.sl2_covered %}
+                <span class="text-xs bg-slate-100 px-1.5 py-0.5 rounded text-slate-700">{{ sid }}</span>
+                {% endfor %}
+              </div>
+            </td>
+            <td class="px-4 py-2 align-top max-w-md">
+              <div class="text-slate-800">{{ p.prompt_zh }}</div>
+              <div x-show="expanded" x-cloak class="mt-2 text-xs text-slate-500 italic">
+                {{ p.prompt_en }}
+              </div>
+              <div x-show="expanded" x-cloak class="mt-1 text-xs text-slate-400">
+                axes: {% for k, v in p.axes_values.items() %}<span class="mr-2">{{ k }}={{ v }}</span>{% endfor %}
+              </div>
+            </td>
+            <td class="px-4 py-2 align-top text-right whitespace-nowrap">
+              <button @click="expanded = !expanded" class="text-xs text-slate-500 hover:text-slate-800 mr-2" x-text="expanded ? '收起' : '展开'">展开</button>
+              <form method="POST" action="/runs/{{ run.id }}/p4/drop/{{ p.id }}" class="inline" onsubmit="return confirm('删除这条 prompt?')">
+                <button type="submit" class="text-xs text-red-500 hover:text-red-700">删除</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  const ctx = document.getElementById('dist-chart').getContext('2d');
+  new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['中等', '困难', 'Stress (重叠)'],
+      datasets: [{
+        data: [{{ coverage.difficulty.medium }}, {{ coverage.difficulty.hard }}, {{ coverage.stress_count }}],
+        backgroundColor: ['#3B82F6', '#EF4444', '#F59E0B'],
+        borderWidth: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } }
+    }
+  });
+</script>
+{% endblock %}

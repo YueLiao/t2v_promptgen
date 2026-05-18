@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}生成中 ｜ {{ run.id }}{% endblock %}
+
+{% block content %}
+<div class="bg-white rounded-xl shadow-sm border border-slate-200 p-12 text-center">
+  <div class="inline-block animate-spin h-12 w-12 border-4 border-orange-500 border-t-transparent rounded-full mb-6"></div>
+  <h2 class="text-xl font-bold text-slate-900 mb-2">正在生成 {{ run.target_set_size }} 条 prompt</h2>
+  <p class="text-sm text-slate-500">维度: {{ run.sl2_list|length }} 个 SL2 × {{ run.axes|length }} 个 axes</p>
+  <p class="text-xs text-slate-400 mt-4">原型模式:直接跳到审核步骤</p>
+  <meta http-equiv="refresh" content="1; url=/runs/{{ run.id }}">
+</div>
+{% endblock %}

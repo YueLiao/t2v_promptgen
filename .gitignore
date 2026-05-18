@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Runtime state (will be ~/.t2v_promptgen/ in user home, but keep guard)
+runs.db
+*.sqlite
+.t2v_promptgen/
+
+# Local secrets
+.env
+.env.*
+config.local.yaml
+*.key
+*.pem
+
+# Build / dist
+build/
+dist/
+*.egg
