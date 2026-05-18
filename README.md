@@ -1,124 +1,209 @@
 # t2v_promptgen
 
-Automated specialty-capability prompt-set generator for T2V evaluation.
+**自动给 T2V(文生视频)模型出测试题。**
 
-## 概念
+你说一句"我想测视频模型生成人手的能力",它就自动:
+1. 列出该测哪些具体细节(手指数量对不对、关节自不自然、握东西稳不稳...)
+2. 批量写测试用例(中英对照,有易有难)
+3. 配套生成评测员打分手册
 
-针对 T2V 模型的**专项能力测评**(人手 / 人体 / 运镜 / 物理仿真 / 美学 / 文本生成 / 情绪 / ...),按需自动生产覆盖率 100% 的 prompt set,配套**维度说明书**给评测员在 GSB AB-test 平台勾选用。
+产物可以直接交给评测员在 GSB(Good/Same/Bad)AB 对比平台上勾选。
 
-与已有的 `elite_150_v3`(通用能力测评)互**独立**,通过 metadata 区分。
+---
 
-## 工作流(5 Phase 状态机)
+## 这是什么 / 不是什么
+
+| | |
+|---|---|
+| ✅ 是 | 针对**某一个能力**(人手/人体/运镜/物理/美学/文字...)出**专项**测试题 |
+| ❌ 不是 | 通用全方位评测 — 那是另一个项目 `elite_150_v3`,本项目独立运作 |
+
+两者通过 metadata 区分,各自有自己的标签库和管线,互不打扰。
+
+---
+
+## 一次任务长什么样
 
 ```mermaid
 stateDiagram-v2
-    [*] --> P0_Intake
+    [*] --> 理解需求
 
-    P0_Intake : P0 ｜ 意图与能力分类
-    P0_Intake --> P1_Dimensions : capability_slug locked
+    理解需求 : ① 理解需求<br/>看懂你想测什么,锁定能力分类
+    理解需求 --> 确定评测维度
 
-    P1_Dimensions : P1 ｜ SL2 / Axes 迭代<br/>(≤ 5 轮 user review)
-    P1_Dimensions --> P1_Dimensions : user requests revision
-    P1_Dimensions --> P2_Prompts : user confirm
+    确定评测维度 : ② 确定评测维度<br/>列出"该测哪些点 + 在哪些条件下测"<br/>(最多 5 轮让你调整)
+    确定评测维度 --> 确定评测维度 : 你说"再加一条"
+    确定评测维度 --> 生成测试用例 : 你说"OK"
 
-    P2_Prompts : P2 ｜ Prompt 生成
-    P2_Prompts --> P3_QA
+    生成测试用例 : ③ 生成测试用例<br/>按维度批量写中英对照的画面描述
+    生成测试用例 --> 自动质检
 
-    P3_QA : P3 ｜ 机器质检<br/>(规则 + LLM judge)
-    P3_QA --> P2_Prompts : fail (≤ 2 retries)
-    P3_QA --> P4_Review : pass
+    自动质检 : ④ 自动质检<br/>规则 + AI 复审,把不达标的退回重写
+    自动质检 --> 生成测试用例 : 不过 (最多重试 2 次)
+    自动质检 --> 审核确认 : 通过
 
-    P4_Review : P4 ｜ 用户审核<br/>(≤ 3 轮修订)
-    P4_Review --> P2_Prompts : user requests regen
-    P4_Review --> P5_Export : user confirm
+    审核确认 : ⑤ 审核确认<br/>你看一遍,可改可删<br/>(最多 3 轮微调)
+    审核确认 --> 生成测试用例 : 你说"再生一批"
+    审核确认 --> 导出结果 : 你说"通过"
 
-    P5_Export : P5 ｜ 导出 + Memory 写入
-    P5_Export --> [*]
+    导出结果 : ⑥ 导出结果<br/>下载测试用例 + 评测员手册<br/>能力模板写入记忆库
+    导出结果 --> [*]
 ```
 
-## 决策记录(已锁定)
+每步在网页上都是单独一页,做完点确认才进下一步。
 
-| 项 | 决策 |
+---
+
+## 几个关键词(本项目内部叫法)
+
+| 内部叫法 | 大白话 |
 |---|---|
-| 维度命名 | 独立 `SL2` 库,可继承自通用 L1+L2 |
-| 难度比例 | medium 60% / hard 40%(无 easy) |
-| Set 大小 | `max(40, axes笛卡尔积 × 1.5)`,上限 120 |
-| Stress case | 必有 30%,`is_stress` 独立字段 |
-| 评测产物 | 维度说明书(给 GSB 评测员勾选用),双语 |
-| Capability 模板 | 无预置,首次跑后入 memory |
-| Memory 跨 run | 默认提示继承上一版 |
-| Seed pool 容量 | 200 / 能力,时间淘汰 |
-| LLM provider | 全程同一个,默认 Claude Opus 4.7 |
-| 多人协作 | v1 不支持 |
-| 与通用集协同 | 独立 |
+| **能力(capability)** | 你这次想测什么 — 比如"人手"、"运镜"、"物理碰撞" |
+| **检查项(SL2)** | 该能力下的细分翻车点。评测员看完视频要逐条勾"是 / 否"。例:对人手能力的检查项 = 手指数量是否正确、关节弯曲是否自然、握物是否稳定... |
+| **测试变量(Axes)** | 每条用例会变化的条件。例:操作复杂度、光照、有没有手套、特写还是远景 |
+| **测试用例 / Prompt** | 一段画面描述。模型看着它生视频。每条中英双语,带难度标注 |
+| **故意刁难(Stress case)** | 占 30% 的极端用例,专门用来"试图把模型逼出错",看它边界在哪 |
+| **评测员手册** | 给评测员的打分指南。说明每条检查项应该看什么、什么算翻车 |
 
-## 工程结构
+---
+
+## 设定参数(已定,不会再改)
+
+| 项 | 取值 | 为什么 |
+|---|---|---|
+| 难度比例 | 中等 60% / 困难 40% | 简单题区分不出模型能力,不要 |
+| 用例数量 | `max(40, 测试变量笛卡尔积 × 1.5)`,上限 120 | 既保证基础覆盖,又不让人评到崩溃 |
+| 故意刁难占比 | 必有 30% | 不刁难就摸不到模型上限 |
+| 中英对照 | 每条都有 | 国内外模型都能测 |
+| 维度调整轮数 | 最多 5 轮 | 防止反复折腾 |
+| 用例调整轮数 | 最多 3 轮 | 同上 |
+| 历史样本池 | 每能力存 200 条优秀用例,按时间淘汰 | 给下次同能力任务做参考 |
+| 多人协作 | v1 不支持 | 单人单任务,先把流程跑通 |
+
+---
+
+## 怎么跑
+
+### 网页版(推荐,适合演示和真用)
+
+```bash
+pip install fastapi uvicorn jinja2 python-multipart pydantic
+cd /path/to/t2v_benchmark
+uvicorn t2v_promptgen.web.app:app --reload --port 8765
+```
+
+浏览器开 `http://localhost:8765`,按页面提示往下点就行。详细说明见 [`web/README.md`](web/README.md)。
+
+### 命令行(自动化/批量)
+
+```bash
+t2v-promptgen create --capability "人手生成能力"   # 新建任务
+t2v-promptgen resume <run_id>                       # 中断后恢复
+t2v-promptgen list                                  # 列出所有任务
+t2v-promptgen memory list                           # 看已存的能力模板
+t2v-promptgen memory show <slug> --version N        # 查具体某版模板
+t2v-promptgen export <run_id> --to ./out/           # 重新导出文件
+```
+
+### 用哪个 AI 服务
+
+支持以下任一,**不绑死单一供应商**:
+
+| 类型 | 选项 |
+|---|---|
+| 中转接口(一个 key 调多家) | yibuapi、自定义 OpenAI 兼容 endpoint |
+| 官方接口 | Anthropic、OpenAI、DeepSeek、阿里 Qwen、月之暗面 Moonshot、智谱 GLM、SiliconFlow |
+
+推荐配置(便宜 + 质量):
+- **分析模型**(用一次,决定测什么):`deepseek-v4-pro` 或 `claude-opus-4-7`
+- **生成模型**(写大量用例):`deepseek-chat` 或 `gpt-4o-mini`
+
+API key 可以网页临时填(只用一次,不存),也可以配进环境变量 / `~/.t2v_promptgen/config.yaml` 长期用。详见网页 ⚙ API 设置页。
+
+---
+
+## 你最终拿到什么文件
+
+任务跑完会有 4 个产物:
+
+| 文件 | 内容 | 给谁用 |
+|---|---|---|
+| `prompts.jsonl` | 测试用例主文件(中英 + 标签) | 喂给视频模型生视频 |
+| `evaluator_handbook.md` | 评测员说明书(Markdown) | 评测员打印照着勾 |
+| `evaluator_handbook.json` | 同上,结构化 JSON 版 | 给评测平台导入 |
+| `coverage_report.json` | 每个检查项 × 每种条件被多少条用例覆盖 | 自查"有没有测漏" |
+
+同时,这次任务里 AI 设计出来的 "检查项 + 测试变量" 会自动存为该能力的**模板**,下次测同一能力可以直接继承,不用重新设计。
+
+---
+
+## 代码结构
 
 ```
 t2v_promptgen/
 ├── core/
-│   ├── schema.py            # Pydantic 数据模型
-│   ├── state.py             # SQLite run-state 持久化
-│   └── orchestrator.py      # 状态机驱动
+│   ├── schema.py            # 数据模型(Pydantic)
+│   ├── state.py             # 任务状态持久化(SQLite)
+│   └── orchestrator.py      # 状态机:决定下一步去哪
 ├── memory/
-│   ├── store.py             # Capability vN 读写
-│   └── seed_pool.py         # 历史样本池(200 上限 + 时间淘汰)
-├── phases/
-│   ├── intake.py            # P0
-│   ├── dimensions.py        # P1
-│   ├── prompts.py           # P2
-│   ├── qa.py                # P3 (orchestrator-side)
-│   └── export.py            # P5
+│   ├── store.py             # 能力模板的版本化存储
+│   └── seed_pool.py         # 优秀用例池(200 上限 + 时间淘汰)
+├── phases/                  # 六步流程,每步一个模块
+│   ├── intake.py            #   ① 理解需求
+│   ├── dimensions.py        #   ② 确定评测维度
+│   ├── prompts.py           #   ③ 生成测试用例
+│   ├── qa.py                #   ④ 自动质检
+│   └── export.py            #   ⑥ 导出
 ├── qa/
-│   ├── rules.py             # 确定性规则
-│   ├── difficulty.py        # 启发式难度打分
-│   └── judge.py             # LLM judge
+│   ├── rules.py             # 确定性规则(长度/格式/敏感词)
+│   ├── difficulty.py        # 难度打分(启发式)
+│   └── judge.py             # AI 复审
 ├── evaluator/
-│   ├── handbook_md.py       # 维度说明书 Markdown
-│   └── handbook_json.py     # 平台 ingest JSON
+│   ├── handbook_md.py       # 生成 Markdown 手册
+│   └── handbook_json.py     # 生成 JSON 手册
+├── tags/
+│   └── library.py           # 2231 个 L4 场景标签库
+│                            # 用来在生成用例时注入具体场景,避免"复杂场景"这种空话
 ├── llm/
-│   ├── base.py              # LLMClient Protocol
-│   └── providers/
+│   ├── base.py              # LLM 客户端协议
+│   └── providers/           # 各家服务的适配器
+│       ├── openai_compat.py # 一个类搞定所有 OpenAI 兼容的服务
 │       ├── anthropic_client.py
-│       ├── openai_client.py
 │       └── ...
-└── cli.py                   # 入口
+├── web/                     # FastAPI 网页前端
+└── cli.py                   # 命令行入口
 ```
 
-## 存储
+---
+
+## 文件存放在哪
 
 ```
 ~/.t2v_promptgen/
-├── runs.db                  # SQLite: run state, 用于 resume
+├── runs.db                  # 所有任务的状态(断了可恢复)
 ├── memory/
 │   ├── capabilities/
-│   │   ├── human_hand/
+│   │   ├── human_hand/      # "人手"能力的历史模板
 │   │   │   ├── v1__2026-05-14__hash.yaml
 │   │   │   ├── v2__2026-05-20__hash.yaml
-│   │   │   └── latest.lnk
+│   │   │   └── latest.lnk   # 指向最新版
 │   │   └── ...
 │   ├── seed_pool/
-│   │   └── human_hand.jsonl   # 历次 P4-confirmed 优秀 prompts
+│   │   └── human_hand.jsonl # 历次通过审核的好用例
 │   └── index.json
-└── config.yaml              # provider / model / cost limits
+└── config.yaml              # API 服务 / 模型 / 费用上限
 ```
 
-## CLI
+---
 
-```bash
-t2v-promptgen create --capability "人手生成能力"
-t2v-promptgen resume <run_id>
-t2v-promptgen list
-t2v-promptgen memory list
-t2v-promptgen memory show <slug> --version N
-t2v-promptgen memory export <slug>
-t2v-promptgen export <run_id> --to ./out/
-```
+## 现在跑到哪一步了
 
-## 状态
+| 版本 | 状态 | 内容 |
+|---|---|---|
+| v0.5 | ✅ 完成 | 代码骨架 + Pydantic 模型 |
+| v0.6 | ✅ 当前 | 网页前端 + 真实 LLM 接入 + 场景标签库 + 双模型(分析/生成分工) |
+| v0.7 | 🚧 进行中 | 自动质检接入(目前 mock) + 任务持久化到 SQLite |
+| v0.8 | 待办 | 完善能力模板继承 + 命令行 |
+| v1.0 | 目标 | 端到端跑通"人手"能力,可交付给评测团队使用 |
 
-**v0.5** ← 你正在看 ｜ 代码骨架(空函数 + Pydantic 模型),等 review
-v0.6 ← 实现 Phase 0/1(意图分类 + 维度生成 LLM 调用)
-v0.7 ← 实现 Phase 2/3(prompt 生成 + 质检)
-v0.8 ← 实现 Phase 4/5(用户交互 + 导出)
-v1.0 ← 端到端跑通"人手"能力
+已验证:用 `deepseek-v4-pro` + `deepseek-chat` 跑出 60 条人手测试用例,7/7 检查项全覆盖,故意刁难占 33%,耗时约 260 秒,产物在 [`out/human_hand_60.jsonl`](out/human_hand_60.jsonl)。
