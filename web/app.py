@@ -26,15 +26,17 @@ from fastapi.templating import Jinja2Templates
 
 from ..core.schema import Axis, Phase, PromptEntry, Run, SL2
 from . import mock_data
+from .llm_routes import router as llm_router
 
 # ---------------------------------------------------------------------------
 # App init
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).parent
-app = FastAPI(title="t2v_promptgen", version="0.6")
+app = FastAPI(title="t2v_promptgen", version="0.7")
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
+app.include_router(llm_router)
 
 # In-memory store
 RUNS: dict[str, Run] = {}
@@ -92,6 +94,11 @@ def _get_run(run_id: str) -> Run:
 # ---------------------------------------------------------------------------
 # Index
 # ---------------------------------------------------------------------------
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    return templates.TemplateResponse(request, "settings.html", {})
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
