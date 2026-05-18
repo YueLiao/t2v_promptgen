@@ -66,9 +66,10 @@ def score(prompt_zh: str, action_count: int, subject_count: int,
     s += action_count * 1.0
     s += subject_count * 0.5
 
-    # Multi-subject bonus (above the first)
+    # Multi-subject bonus (above the first) — bumped from 1.5 to 2.0 to
+    # ensure multi-subject prompts reliably land in hard band
     if subject_count >= 2:
-        s += 1.5 * (subject_count - 1)
+        s += 2.0 * (subject_count - 1)
 
     # Cross-SL2 coverage bonus: testing 2+ SL2 in one prompt = harder
     if sl2_covered and len(sl2_covered) >= 2:

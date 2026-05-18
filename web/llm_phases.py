@@ -169,6 +169,20 @@ T2V 生成的是 **5 秒视频**,不是静态图。每条 prompt 都必须描述
 
 ⚠ **每条 prompt 必须显式选一个 subject_type**,我会按批统计实际分布并在下批告诉你需要补什么类型。**当某类已超配额时,绝对不要再生成那类**。
 
+# 主体数量多样性(同样强制,优先多主体)
+
+单主体太单调 — 真实视频里物体很少孤立运动。本批 subject_count 分布:
+
+| subject_count | 占比 | 说明 / 例子 |
+|---|---|---|
+| **1**(单主体)      | ≤40% | 单人/单物动作:一个人弹钢琴、一只猫舔毛 |
+| **2**(双主体互动)  | **35-45%** | 两人击掌、人遛狗、猫扑老鼠、两球相撞、水滴入碗、人推手推车 |
+| **3+**(群体)       | 20-25% | 鸟群转向、乐队演奏、球员争抢、蚁队搬运、人群涌动、瀑布多股水流 |
+
+多主体是 T2V 最难的部分,能压出:空间一致性 / 同步异步 / 主体间遮挡 / 交互物理。**优先多主体**,只在确实只能单主体描述(如"独自一人冥想")时用 1。
+
+跨主体类型组合也鼓励:人+动物(遛狗)、人+物体(推车)、动物+自然(鱼跃水面)、物体+物体(球碰球)。
+
 # 难度梯度(必须真的有梯度)
 
 **medium (60%)** — 单主体 + 2-3 段动作 + 简单因果
@@ -256,8 +270,15 @@ def generate_prompts_real(
         "natural_phenomenon": 0.12,
         "abstract_effect": 0.03,
     }
+    # Subject-count distribution: drive prompts toward multi-subject
+    SUBJ_COUNT_QUOTA = {
+        1: 0.35,   # ≤40% single-subject
+        2: 0.40,   # 35-45% two-subject interaction
+        3: 0.25,   # 20-25% group (3+)
+    }
     # Running counters across batches
     subject_counts: dict[str, int] = {k: 0 for k in SUBJECT_QUOTA}
+    subj_count_bins: dict[int, int] = {1: 0, 2: 0, 3: 0}    # 3 = "3 or more"
     scene_l3_counts: dict[str, int] = {}
     verb_counts: dict[str, int] = {}
 
@@ -278,6 +299,20 @@ def generate_prompts_real(
                 lines.append(f"- {st}: 已 {cur}({cur_frac:.0%}) << 目标 {target_frac:.0%} → ✅ 本批多生成,至少补 {deficit} 条")
             else:
                 lines.append(f"- {st}: 已 {cur}({cur_frac:.0%}) 进度正常,可继续")
+        # Subject-count quota lines
+        lines.append("")
+        lines.append("【主体数量进度】")
+        for bucket, target_frac in SUBJ_COUNT_QUOTA.items():
+            target_count = int(target_frac * target)
+            cur = subj_count_bins.get(bucket, 0)
+            cur_frac = cur / done if done else 0
+            label = f"{bucket}+ 主体" if bucket == 3 else f"{bucket} 主体"
+            if cur >= target_count:
+                lines.append(f"- {label}: 已 {cur}({cur_frac:.0%}) ≥ 目标 → ⛔ 暂时不再生成这种")
+            elif cur_frac < target_frac * 0.7:
+                lines.append(f"- {label}: 已 {cur}({cur_frac:.0%}) << 目标 {target_frac:.0%} → ✅ 本批多生成")
+            else:
+                lines.append(f"- {label}: 已 {cur}({cur_frac:.0%}) 进度正常")
         # Scene over-use warning
         hot_scenes = [(s, n) for s, n in scene_l3_counts.items() if n >= 3]
         if hot_scenes:
@@ -359,10 +394,17 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
                     # over quota (hard cap; the LLM was told but sometimes ignores).
                     subject_type = (item.get("subject_type") or "human").lower()
                     if subject_type not in SUBJECT_QUOTA:
-                        subject_type = "object"   # bucket unknowns into 'object'
+                        subject_type = "object"
                     target_count = int(SUBJECT_QUOTA[subject_type] * target_size) + 1
                     if subject_counts.get(subject_type, 0) >= target_count:
-                        # Already at quota → reject and let loop re-fetch a different type
+                        continue
+
+                    # Subject-count gate: cap single-subject prompts so we get
+                    # the multi-subject ratio the user wants.
+                    raw_subj_count = int(item.get("subject_count", 1) or 1)
+                    bucket = min(max(raw_subj_count, 1), 3)
+                    sc_quota_count = int(SUBJ_COUNT_QUOTA[bucket] * target_size) + 1
+                    if subj_count_bins.get(bucket, 0) >= sc_quota_count:
                         continue
 
                     sc = diff_score(
@@ -412,6 +454,7 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
 
                     # Update running diversity counters
                     subject_counts[subject_type] = subject_counts.get(subject_type, 0) + 1
+                    subj_count_bins[bucket] = subj_count_bins.get(bucket, 0) + 1
                     l3 = item.get("scene_l3")
                     if l3:
                         scene_l3_counts[l3] = scene_l3_counts.get(l3, 0) + 1
