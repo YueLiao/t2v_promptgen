@@ -61,14 +61,75 @@ _HAND_AXES_SEED = [
 ]
 
 
+_BODY_SL2_SEED = [
+    ("body_proportion", "肢体比例失调", "四肢长度或躯干比例违反人体解剖", ["全身", "走路"]),
+    ("body_joint_articulation", "关节弯曲异常", "膝/肘/肩关节角度违反生理范围", ["弯腰", "下蹲"]),
+    ("body_balance", "重心平衡失稳", "动作过程中身体重心明显偏移到不合理位置", ["独立", "跳跃"]),
+    ("body_limb_count", "肢体数量错误", "出现多/缺四肢或异常融合", ["特写"]),
+    ("body_pose_consistency", "姿态时序一致性差", "前后帧姿态不连贯,有跳变", ["快速动作"]),
+    ("body_motion_smoothness", "运动不平滑", "肢体移动有抖动或不自然停顿", ["跑步", "舞蹈"]),
+    ("body_face_structure", "面部结构畸变", "五官位置或大小异常", ["特写", "正面"]),
+]
+_BODY_AXES_SEED = [
+    ("视角", ["全身正面", "半身", "特写局部", "侧面"]),
+    ("动作幅度", ["大幅", "中幅", "微动"]),
+    ("光照", ["顺光", "侧光", "逆光"]),
+    ("场景", ["室内白底", "室外自然", "舞台聚光"]),
+]
+
+_CAMERA_SL2_SEED = [
+    ("camera_motion_type", "运镜类型错误", "实际运镜与 prompt 指定的类型不符", ["跟随", "推近"]),
+    ("camera_motion_smoothness", "运镜不平滑", "镜头移动有抖动/卡顿/不规律加速", ["跟随主体"]),
+    ("camera_speed_consistency", "运镜速度异常", "推拉速度突变或过快过慢", ["慢慢推近"]),
+    ("camera_subject_locking", "主体跟随脱锁", "跟随镜头丢失主体或视点偏离", ["跟随主体"]),
+    ("camera_parallax", "视差不合理", "近物远物视差不符合 3D 一致性", ["第一视角"]),
+    ("camera_scene_continuity", "场景连续性破坏", "运镜中背景出现跳变或瞬移", ["拉远", "POV"]),
+]
+_CAMERA_AXES_SEED = [
+    ("运镜类型", ["静止", "推近", "拉远", "横移", "跟随", "第一视角"]),
+    ("速度", ["慢", "中", "快"]),
+    ("主体距离", ["特写", "中景", "远景"]),
+    ("场景复杂度", ["简单背景", "中等", "繁复城市"]),
+]
+
+_PHYSICS_SL2_SEED = [
+    ("phys_gravity", "违背重力", "物体下落/抛物线轨迹错误", ["落下", "抛出"]),
+    ("phys_collision", "碰撞不真实", "物体碰撞后形变/反弹不符合材质", ["撞击"]),
+    ("phys_fluid", "流体异常", "液体流动/水花/烟雾形态错误", ["水流", "倒水"]),
+    ("phys_cloth", "布料 / 织物物理错误", "衣服/旗帜/窗帘随风方向或重力错乱", ["飘动", "挥动"]),
+    ("phys_penetration", "穿模", "物体或人物部分穿过另一物体", ["接触", "握"]),
+    ("phys_friction", "摩擦表现异常", "滑动/打滑/抓地缺失或过度", ["滑动", "刹车"]),
+]
+_PHYSICS_AXES_SEED = [
+    ("物理类型", ["固体碰撞", "流体", "布料", "颗粒", "弹性"]),
+    ("速度", ["慢", "中", "快"]),
+    ("尺度", ["小物体", "中型", "大型场景"]),
+    ("环境", ["真空", "重力下", "水下"]),
+]
+
+_CAPABILITY_TEMPLATES = {
+    "human_hand": (_HAND_SL2_SEED, _HAND_AXES_SEED),
+    "human_body": (_BODY_SL2_SEED, _BODY_AXES_SEED),
+    "camera_motion": (_CAMERA_SL2_SEED, _CAMERA_AXES_SEED),
+    "physics": (_PHYSICS_SL2_SEED, _PHYSICS_AXES_SEED),
+}
+
+
 def generate_mock_dimensions(description: str, round: int = 0,
-                              feedback: str = "") -> tuple[list[SL2], list[Axis]]:
+                              feedback: str = "",
+                              capability_slug: str = "") -> tuple[list[SL2], list[Axis]]:
     """Return (sl2_list, axes) for the dimensions phase.
 
+    Picks template by capability slug (or detects from description).
     Rounds simulate iteration — later rounds slightly tweak based on feedback.
     """
-    sl2_data = list(_HAND_SL2_SEED)
-    axes_data = list(_HAND_AXES_SEED)
+    if not capability_slug:
+        capability_slug = mock_slug_for(description)
+    template_sl2, template_axes = _CAPABILITY_TEMPLATES.get(
+        capability_slug, (_HAND_SL2_SEED, _HAND_AXES_SEED)
+    )
+    sl2_data = list(template_sl2)
+    axes_data = list(template_axes)
 
     if round >= 2 and feedback:
         # mock: appending a feedback-derived SL2 if user mentions a keyword

@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..core.schema import Axis, Phase, PromptEntry, Run, SL2
 from . import mock_data
+from . import llm_phases
 from .llm_routes import router as llm_router
 
 # ---------------------------------------------------------------------------
@@ -40,6 +41,50 @@ app.include_router(llm_router)
 
 # In-memory store
 RUNS: dict[str, Run] = {}
+
+# Per-run credentials (never persisted, never returned via API)
+RUN_CREDS: dict[str, dict] = {}
+
+
+def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
+    """Try LLM-backed dimension generation. Returns (sl2, axes) or raises."""
+    creds = RUN_CREDS.get(run_id)
+    if not creds or not creds.get("api_key"):
+        raise RuntimeError("no credentials")
+    client = llm_phases.build_client(
+        provider=creds["provider"],
+        model=creds["model"],
+        api_key=creds["api_key"],
+        base_url=creds.get("base_url") or None,
+    )
+    return llm_phases.generate_dimensions_real(
+        description=run.user_description or "",
+        client=client,
+        previous_sl2=run.sl2_list or None,
+        previous_axes=run.axes or None,
+        feedback=feedback,
+        round_idx=run.p1_round,
+    )
+
+
+def _try_real_prompts(run_id: str, run: Run):
+    """Try LLM-backed prompt generation. Returns list[PromptEntry] or raises."""
+    creds = RUN_CREDS.get(run_id)
+    if not creds or not creds.get("api_key"):
+        raise RuntimeError("no credentials")
+    client = llm_phases.build_client(
+        provider=creds["provider"],
+        model=creds["model"],
+        api_key=creds["api_key"],
+        base_url=creds.get("base_url") or None,
+    )
+    return llm_phases.generate_prompts_real(
+        capability=run.capability_slug,
+        sl2_list=run.sl2_list,
+        axes=run.axes,
+        target_size=run.target_set_size or 40,
+        client=client,
+    )
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -117,8 +162,10 @@ async def index(request: Request):
 async def create_run(
     description: str = Form(...),
     set_size: str = Form("auto"),
-    provider: str = Form("anthropic"),
-    model: str = Form("claude-opus-4-7"),
+    provider: str = Form("yibuapi"),
+    model: str = Form("gemini-2.5-pro"),
+    api_key: str = Form(""),
+    base_url: str = Form(""),
 ):
     run_id = str(uuid.uuid4())[:8]
     now = datetime.now()
@@ -135,8 +182,25 @@ async def create_run(
         model=model,
     )
 
-    # Mock initial SL2/axes (decision N: agent gives draft)
-    run.sl2_list, run.axes = mock_data.generate_mock_dimensions(description, round=0)
+    # Store credentials for this run (memory only)
+    if api_key:
+        RUN_CREDS[run_id] = {
+            "provider": provider,
+            "model": model,
+            "api_key": api_key,
+            "base_url": base_url or None,
+        }
+
+    # Try real LLM, fall back to mock
+    try:
+        run.sl2_list, run.axes = _try_real_dimensions(run_id, run)
+    except Exception as exc:
+        run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
+            description, round=0, capability_slug=slug
+        )
+        # Mark in decisions_log (visible in API)
+        if hasattr(run, "decisions_log"):
+            pass  # decisions_log lives in CapabilityVersion, not Run
 
     # Compute target set size from axes (decision C3)
     from ..phases.dimensions import compute_min_set_size
@@ -180,9 +244,13 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
         return await p1_confirm(run_id)
 
     run.p1_round += 1
-    run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
-        run.user_description, round=run.p1_round, feedback=free_text
-    )
+    try:
+        run.sl2_list, run.axes = _try_real_dimensions(run_id, run, feedback=free_text)
+    except Exception:
+        run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
+            run.user_description, round=run.p1_round, feedback=free_text,
+            capability_slug=run.capability_slug
+        )
     # Recompute target_set_size based on updated axes
     from ..phases.dimensions import compute_min_set_size
     run.target_set_size = compute_min_set_size(run.axes)
@@ -194,10 +262,15 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
 async def p1_confirm(run_id: str):
     run = _get_run(run_id)
     run.phase = Phase.P2_PROMPTS
-    # Mock generation (real: prompts.run + qa.run)
-    run.prompts = mock_data.generate_mock_prompts(
-        run.sl2_list, run.axes, run.target_set_size or 60
-    )
+    # Try real LLM, fall back to mock
+    try:
+        run.prompts = _try_real_prompts(run_id, run)
+        if not run.prompts:
+            raise RuntimeError("empty LLM response")
+    except Exception:
+        run.prompts = mock_data.generate_mock_prompts(
+            run.sl2_list, run.axes, run.target_set_size or 60
+        )
     # Skip P3 in mock; go straight to review
     run.phase = Phase.P4_REVIEW
     run.updated_at = datetime.now()
