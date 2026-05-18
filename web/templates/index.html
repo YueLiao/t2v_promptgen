@@ -20,7 +20,7 @@
         <p class="text-xs text-slate-400 mt-1">用自然语言描述要测什么能力、为什么要测、关注哪些细节</p>
       </div>
 
-      <div class="grid grid-cols-4 gap-4">
+      <div class="grid grid-cols-2 gap-4">
         <div>
           <label class="block text-sm font-medium text-slate-700 mb-1">Set 大小</label>
           <select name="set_size" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
@@ -35,25 +35,39 @@
         <div>
           <label class="block text-sm font-medium text-slate-700 mb-1">Provider</label>
           <select name="provider" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
-            <optgroup label="中转">
-              <option value="yibuapi" selected>yibuapi</option>
-              <option value="openai_compat">custom OpenAI-compat</option>
-            </optgroup>
             <optgroup label="原生">
+              <option value="deepseek" selected>DeepSeek</option>
               <option value="anthropic">Anthropic</option>
               <option value="openai">OpenAI</option>
-              <option value="deepseek">DeepSeek</option>
               <option value="qwen">Qwen</option>
               <option value="moonshot">Moonshot</option>
               <option value="zhipu">智谱</option>
               <option value="siliconflow">SiliconFlow</option>
             </optgroup>
+            <optgroup label="中转">
+              <option value="yibuapi">yibuapi</option>
+              <option value="openai_compat">custom OpenAI-compat</option>
+            </optgroup>
           </select>
         </div>
-        <div class="col-span-2">
-          <label class="block text-sm font-medium text-slate-700 mb-1">Model ID</label>
-          <input name="model" value="gemini-2.5-pro" placeholder="gemini-2.5-pro / claude-opus-4-7 / gpt-4o"
-            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono">
+      </div>
+
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">
+            <span class="text-emerald-700">P1 维度生成模型</span>
+            <span class="text-xs text-slate-400 font-normal">(质量,慢,一次性)</span>
+          </label>
+          <input name="model_p1" value="deepseek-v4-pro" placeholder="deepseek-v4-pro"
+            class="w-full border border-emerald-300 rounded-lg px-3 py-2 text-sm font-mono">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">
+            <span class="text-sky-700">P2 Prompt 生成模型</span>
+            <span class="text-xs text-slate-400 font-normal">(速度,多批次)</span>
+          </label>
+          <input name="model_p2" value="deepseek-chat" placeholder="deepseek-chat"
+            class="w-full border border-sky-300 rounded-lg px-3 py-2 text-sm font-mono">
         </div>
       </div>
 

@@ -53,7 +53,7 @@ def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
         raise RuntimeError("no credentials")
     client = llm_phases.build_client(
         provider=creds["provider"],
-        model=creds["model"],
+        model=creds.get("model_p1") or creds["model"],   # higher-quality model for P1
         api_key=creds["api_key"],
         base_url=creds.get("base_url") or None,
     )
@@ -74,7 +74,7 @@ def _try_real_prompts(run_id: str, run: Run):
         raise RuntimeError("no credentials")
     client = llm_phases.build_client(
         provider=creds["provider"],
-        model=creds["model"],
+        model=creds.get("model_p2") or creds["model"],   # cheaper/faster model for P2
         api_key=creds["api_key"],
         base_url=creds.get("base_url") or None,
     )
@@ -162,8 +162,9 @@ async def index(request: Request):
 async def create_run(
     description: str = Form(...),
     set_size: str = Form("auto"),
-    provider: str = Form("yibuapi"),
-    model: str = Form("gemini-2.5-pro"),
+    provider: str = Form("deepseek"),
+    model_p1: str = Form("deepseek-v4-pro"),       # 维度生成(质量,慢)
+    model_p2: str = Form("deepseek-chat"),         # prompt 生成(速度,多批次)
     api_key: str = Form(""),
     base_url: str = Form(""),
 ):
@@ -179,14 +180,16 @@ async def create_run(
         phase=Phase.P1_DIMENSIONS,             # auto-skip P0 (intake is just slug extraction)
         user_description=description,
         provider=provider,
-        model=model,
+        model=f"{model_p1} / {model_p2}",        # display-only
     )
 
     # Store credentials for this run (memory only)
     if api_key:
         RUN_CREDS[run_id] = {
             "provider": provider,
-            "model": model,
+            "model": model_p1,                   # fallback if a phase doesn't specify
+            "model_p1": model_p1,
+            "model_p2": model_p2,
             "api_key": api_key,
             "base_url": base_url or None,
         }
