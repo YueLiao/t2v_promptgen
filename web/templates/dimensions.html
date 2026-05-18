@@ -50,6 +50,135 @@
 </div>
 {% endif %}
 
+{% if dim_critique and dim_critique.judge_ran %}
+<div class="mb-4 rounded-xl border
+  {% if dim_critique.verdict == 'good_to_go' %}bg-green-50 border-green-200
+  {% elif dim_critique.verdict == 'minor_issues' %}bg-amber-50 border-amber-200
+  {% else %}bg-red-50 border-red-200{% endif %} p-5"
+  x-data="{ expanded: {% if dim_critique.verdict != 'good_to_go' %}true{% else %}false{% endif %} }">
+  <div class="flex items-start justify-between gap-4">
+    <div class="flex-1">
+      <div class="flex items-center gap-3 mb-1 flex-wrap">
+        <h3 class="text-sm font-bold
+          {% if dim_critique.verdict == 'good_to_go' %}text-green-900
+          {% elif dim_critique.verdict == 'minor_issues' %}text-amber-900
+          {% else %}text-red-900{% endif %}">
+          AI 维度评审
+        </h3>
+        <span class="text-xs px-2 py-0.5 rounded font-medium
+          {% if dim_critique.verdict == 'good_to_go' %}bg-green-200 text-green-900
+          {% elif dim_critique.verdict == 'minor_issues' %}bg-amber-200 text-amber-900
+          {% else %}bg-red-200 text-red-900{% endif %}">
+          {% if dim_critique.verdict == 'good_to_go' %}✓ 可以用
+          {% elif dim_critique.verdict == 'minor_issues' %}⚠ 有小问题
+          {% else %}✗ 建议重生{% endif %}
+        </span>
+        <span class="text-xs text-slate-600">评分 {{ dim_critique.score }}/10</span>
+        {% set total_issues = (dim_critique.sl2_issues|length) + (dim_critique.axes_issues|length) + (dim_critique.gaps|length) + (dim_critique.redundancies|length) %}
+        {% if total_issues > 0 %}
+        <span class="text-xs text-slate-500">{{ total_issues }} 处提示</span>
+        {% endif %}
+      </div>
+      <p class="text-sm
+        {% if dim_critique.verdict == 'good_to_go' %}text-green-800
+        {% elif dim_critique.verdict == 'minor_issues' %}text-amber-800
+        {% else %}text-red-800{% endif %}">
+        {{ dim_critique.summary }}
+      </p>
+    </div>
+    {% if total_issues > 0 %}
+    <button @click="expanded = !expanded"
+      class="text-xs text-slate-500 hover:text-slate-800 whitespace-nowrap">
+      <span x-show="!expanded">展开详情 ▼</span>
+      <span x-show="expanded">收起 ▲</span>
+    </button>
+    {% endif %}
+  </div>
+
+  <div x-show="expanded" x-cloak class="mt-4 space-y-3 text-sm">
+    {% if dim_critique.gaps %}
+    <div class="bg-white/60 rounded-lg p-3">
+      <h4 class="text-xs font-semibold text-slate-700 mb-1.5">🕳 覆盖空缺</h4>
+      <ul class="space-y-1 text-xs">
+        {% for g in dim_critique.gaps %}
+        <li class="text-slate-700"><b>{{ g.what }}</b> — {{ g.why }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if dim_critique.redundancies %}
+    <div class="bg-white/60 rounded-lg p-3">
+      <h4 class="text-xs font-semibold text-slate-700 mb-1.5">♻ 重复 / 重叠</h4>
+      <ul class="space-y-1 text-xs">
+        {% for r in dim_critique.redundancies %}
+        <li class="text-slate-700">
+          {% for sid in r.items %}<code class="bg-slate-100 px-1 rounded">{{ sid }}</code>{% if not loop.last %} ↔ {% endif %}{% endfor %}
+          — {{ r.issue }}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if dim_critique.sl2_issues %}
+    <div class="bg-white/60 rounded-lg p-3">
+      <h4 class="text-xs font-semibold text-slate-700 mb-1.5">检查项问题 ({{ dim_critique.sl2_issues|length }})</h4>
+      <ul class="space-y-1.5 text-xs">
+        {% for s in dim_critique.sl2_issues %}
+        <li>
+          <span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium mr-1
+            {% if s.severity == 'error' %}bg-red-200 text-red-800
+            {% elif s.severity == 'warn' %}bg-amber-200 text-amber-800
+            {% else %}bg-slate-200 text-slate-700{% endif %}">
+            {% if s.severity == 'error' %}严重{% elif s.severity == 'warn' %}注意{% else %}提示{% endif %}
+          </span>
+          <code class="bg-slate-100 px-1 rounded">{{ s.sl2_id }}</code>:
+          {{ s.issue }}
+          {% if s.suggestion %}<span class="text-slate-500"> → 建议:{{ s.suggestion }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if dim_critique.axes_issues %}
+    <div class="bg-white/60 rounded-lg p-3">
+      <h4 class="text-xs font-semibold text-slate-700 mb-1.5">测试变量问题 ({{ dim_critique.axes_issues|length }})</h4>
+      <ul class="space-y-1.5 text-xs">
+        {% for a in dim_critique.axes_issues %}
+        <li>
+          <span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium mr-1
+            {% if a.severity == 'error' %}bg-red-200 text-red-800
+            {% elif a.severity == 'warn' %}bg-amber-200 text-amber-800
+            {% else %}bg-slate-200 text-slate-700{% endif %}">
+            {% if a.severity == 'error' %}严重{% elif a.severity == 'warn' %}注意{% else %}提示{% endif %}
+          </span>
+          <b>{{ a.axis_name }}</b>: {{ a.issue }}
+          {% if a.suggestion %}<span class="text-slate-500"> → 建议:{{ a.suggestion }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if dim_critique.suggested_feedback %}
+    <div class="bg-white border border-slate-300 rounded-lg p-3">
+      <div class="flex items-center justify-between mb-1.5">
+        <h4 class="text-xs font-semibold text-slate-700">💡 建议反馈意见(右边输入框可直接采纳)</h4>
+        <button type="button"
+          onclick="document.querySelector('textarea[name=free_text]').value = `{{ dim_critique.suggested_feedback|e }}`; window.scrollTo({top: 0});"
+          class="text-xs bg-orange-100 hover:bg-orange-200 text-orange-800 px-2 py-1 rounded">
+          一键采纳 →
+        </button>
+      </div>
+      <p class="text-xs text-slate-700 whitespace-pre-wrap">{{ dim_critique.suggested_feedback }}</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {% if last_error %}
 <div class="mb-4 bg-amber-50 border border-amber-300 rounded-lg p-4">
   <div class="flex items-start gap-3">
@@ -79,14 +208,37 @@
       </div>
       <div class="divide-y divide-slate-100">
         {% for sl2 in run.sl2_list %}
-        <div class="px-6 py-4 hover:bg-slate-50">
+        {% set sl2_issue = none %}
+        {% if dim_critique and dim_critique.sl2_issues %}
+          {% set sl2_issue = dim_critique.sl2_issues|selectattr('sl2_id', 'equalto', sl2.id)|first %}
+        {% endif %}
+        <div class="px-6 py-4 hover:bg-slate-50
+          {% if sl2_issue and sl2_issue.severity == 'error' %}bg-red-50/50
+          {% elif sl2_issue and sl2_issue.severity == 'warn' %}bg-amber-50/50{% endif %}">
           <div class="flex items-start justify-between gap-4">
             <div class="flex-1">
-              <div class="flex items-center gap-2 mb-1">
+              <div class="flex items-center gap-2 mb-1 flex-wrap">
                 <span class="text-sm font-semibold text-slate-900">{{ sl2.name }}</span>
                 <code class="text-xs bg-slate-100 px-1.5 py-0.5 rounded text-slate-500">{{ sl2.id }}</code>
+                {% if sl2_issue %}
+                <span class="text-xs px-1.5 py-0.5 rounded font-medium
+                  {% if sl2_issue.severity == 'error' %}bg-red-200 text-red-800
+                  {% elif sl2_issue.severity == 'warn' %}bg-amber-200 text-amber-800
+                  {% else %}bg-slate-200 text-slate-700{% endif %}"
+                  title="{{ sl2_issue.issue }}{% if sl2_issue.suggestion %} → {{ sl2_issue.suggestion }}{% endif %}">
+                  {% if sl2_issue.severity == 'error' %}✗ 严重{% elif sl2_issue.severity == 'warn' %}⚠ 注意{% else %}ⓘ{% endif %}
+                </span>
+                {% endif %}
               </div>
               <p class="text-sm text-slate-600">{{ sl2.description }}</p>
+              {% if sl2_issue %}
+              <p class="text-xs mt-1
+                {% if sl2_issue.severity == 'error' %}text-red-700
+                {% elif sl2_issue.severity == 'warn' %}text-amber-700
+                {% else %}text-slate-500{% endif %}">
+                <b>评审:</b> {{ sl2_issue.issue }}{% if sl2_issue.suggestion %} <span class="text-slate-500">→ {{ sl2_issue.suggestion }}</span>{% endif %}
+              </p>
+              {% endif %}
               {% if sl2.stress_keywords %}
               <div class="mt-2 flex flex-wrap gap-1">
                 <span class="text-xs text-slate-400">易触发关键词:</span>
@@ -113,15 +265,41 @@
       </div>
       <div class="divide-y divide-slate-100">
         {% for axis in run.axes %}
-        <div class="px-6 py-4">
+        {% set axis_issue = none %}
+        {% if dim_critique and dim_critique.axes_issues %}
+          {% set axis_issue = dim_critique.axes_issues|selectattr('axis_name', 'equalto', axis.name)|first %}
+        {% endif %}
+        <div class="px-6 py-4
+          {% if axis_issue and axis_issue.severity == 'error' %}bg-red-50/50
+          {% elif axis_issue and axis_issue.severity == 'warn' %}bg-amber-50/50{% endif %}">
           <div class="flex items-start gap-4">
             <div class="w-32 flex-shrink-0">
               <span class="text-sm font-semibold text-slate-900">{{ axis.name }}</span>
+              {% if axis_issue %}
+              <div class="mt-1">
+                <span class="text-xs px-1.5 py-0.5 rounded font-medium
+                  {% if axis_issue.severity == 'error' %}bg-red-200 text-red-800
+                  {% elif axis_issue.severity == 'warn' %}bg-amber-200 text-amber-800
+                  {% else %}bg-slate-200 text-slate-700{% endif %}">
+                  {% if axis_issue.severity == 'error' %}✗ 严重{% elif axis_issue.severity == 'warn' %}⚠ 注意{% else %}ⓘ{% endif %}
+                </span>
+              </div>
+              {% endif %}
             </div>
-            <div class="flex flex-wrap gap-1.5">
-              {% for v in axis.values %}
-              <span class="text-xs bg-slate-100 text-slate-700 px-2.5 py-1 rounded-full font-medium">{{ v }}</span>
-              {% endfor %}
+            <div class="flex-1">
+              <div class="flex flex-wrap gap-1.5">
+                {% for v in axis.values %}
+                <span class="text-xs bg-slate-100 text-slate-700 px-2.5 py-1 rounded-full font-medium">{{ v }}</span>
+                {% endfor %}
+              </div>
+              {% if axis_issue %}
+              <p class="text-xs mt-1.5
+                {% if axis_issue.severity == 'error' %}text-red-700
+                {% elif axis_issue.severity == 'warn' %}text-amber-700
+                {% else %}text-slate-500{% endif %}">
+                <b>评审:</b> {{ axis_issue.issue }}{% if axis_issue.suggestion %} <span class="text-slate-500">→ {{ axis_issue.suggestion }}</span>{% endif %}
+              </p>
+              {% endif %}
             </div>
           </div>
         </div>

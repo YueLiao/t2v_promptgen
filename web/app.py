@@ -68,6 +68,34 @@ def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
     )
 
 
+def _try_judge_dimensions(run_id: str, run: Run):
+    """Judge the current dimensions design. Returns critique dict (always)."""
+    from ..qa.dimensions_judge import judge_dimensions
+    creds = RUN_CREDS.get(run_id)
+    client = None
+    if creds and creds.get("api_key"):
+        try:
+            client = llm_phases.build_client(
+                provider=creds["provider"],
+                model=creds.get("model_p1") or creds["model"],   # analysis model = judge
+                api_key=creds["api_key"],
+                base_url=creds.get("base_url") or None,
+            )
+        except Exception as exc:
+            print(f"[P1 judge client build failed] {exc}", flush=True)
+    try:
+        critique = judge_dimensions(
+            description=run.user_description or "",
+            sl2_list=run.sl2_list,
+            axes=run.axes,
+            client=client,
+        )
+        return critique.to_dict()
+    except Exception as exc:
+        print(f"[P1 judge failed] {exc}", flush=True)
+        return {"judge_ran": False}
+
+
 def _try_real_prompts(run_id: str, run: Run):
     """Try LLM-backed prompt generation. Returns list[PromptEntry] or raises."""
     creds = RUN_CREDS.get(run_id)
@@ -121,6 +149,9 @@ RUN_LAST_ERROR: dict[str, str] = {}
 
 # P0 intake classification result (slug + confidence + reasoning) per run
 RUN_INTAKE: dict[str, dict] = {}
+
+# P1 dimensions critique per run (score, verdict, sl2 issues, axes issues, gaps)
+RUN_DIM_CRITIQUE: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +307,9 @@ async def create_run(
             run.target_set_size = 60
 
     RUNS[run_id] = run
+
+    # P1 judge — critique the freshly-generated dimensions
+    RUN_DIM_CRITIQUE[run_id] = _try_judge_dimensions(run_id, run)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
@@ -295,6 +329,9 @@ async def view_run(request: Request, run_id: str):
 
     if RUN_INTAKE.get(run_id):
         extra["intake"] = RUN_INTAKE[run_id]
+
+    if run.phase == Phase.P1_DIMENSIONS and RUN_DIM_CRITIQUE.get(run_id):
+        extra["dim_critique"] = RUN_DIM_CRITIQUE[run_id]
 
     return templates.TemplateResponse(request, template, _ctx(run, **extra))
 
@@ -343,6 +380,8 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
     # Recompute target_set_size based on updated axes
     from ..phases.dimensions import compute_min_set_size
     run.target_set_size = compute_min_set_size(run.axes)
+    # Re-judge the new design
+    RUN_DIM_CRITIQUE[run_id] = _try_judge_dimensions(run_id, run)
     run.updated_at = datetime.now()
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
