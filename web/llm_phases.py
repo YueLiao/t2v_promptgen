@@ -140,6 +140,23 @@ _PROMPTS_SYSTEM = """你是 T2V 评测 prompt 设计专家。给定一组 SL2(�
 - ❌ 反例(20 字):"狗先向前跑,然后绕过一棵树,接着继续向前跑。" — 缺主体特征 / 树的描述 / 视觉细节
 - ✅ 正例(60 字):"一只金毛犬先沿着林荫小径加速奔跑,接着灵巧地绕过一棵粗壮的橡树,溅起树叶飞舞,最后继续向前冲向林深处。"
 
+# 文本完整性铁律(违反就废)
+
+prompt_zh 和 prompt_en 是**唯一送给 T2V 模型的输入**。metadata 字段(camera_zh / axes_values 等)模型看不到。
+所以所有指令必须**写进 prompt 文本里**,不能只放在 JSON 字段里。
+
+- **camera_zh 必须作为开头出现在 prompt_zh 里**(以"镜头XX,"或"XX镜头,"形式),英文同理
+  ✅ "**镜头慢慢推近,**一只手……"
+  ❌ camera_zh="慢慢推近" 但 prompt_zh="一只手……"(镜头方向丢失)
+- **axes_values 的所有值都必须能从 prompt_zh 读出来**
+  - "速度类型=慢动作" → 文本里出现"慢慢 / 缓慢 / 慢动作 / 减速"等词
+  - "速度类型=快速" → "迅速 / 快速 / 急 / 突然"
+  - "主体数=两人交互" → 文本明确两个主体
+  - "动作段数=3 段" → 文本有 3 段时序("先…然后…最后…")
+  - "镜头切换=1 次切换" → 文本写出切换("画面切到…")
+  - "因果类型=物理碰撞" → 描述具体碰撞 / 因果事件
+- 若某个 axis 值无法自然嵌入,**重写 prompt 直到能嵌入**,不要敷衍
+
 # 视频特性铁律(违反就废)
 
 T2V 生成的是 **5 秒视频**,不是静态图。每条 prompt 都必须描述**有动作、有时序**的画面。
@@ -398,6 +415,31 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
                     en_words = len(prompt_en.split())
                     if not (15 <= en_words <= 60):
                         continue
+
+                    # Camera-in-text gate: the camera direction must be in the
+                    # prompt body, not just in metadata — T2V model only sees text.
+                    cam_zh = (item.get("camera_zh") or "").strip()
+                    if cam_zh:
+                        # Extract the descriptive part (drop "镜头" / 标点)
+                        cam_key = cam_zh.replace("镜头", "").strip(",.，。、 ")
+                        if cam_key and cam_key not in prompt_zh:
+                            continue
+
+                    # Speed-axis-in-text gate: 速度类型 / speed must be reflected
+                    SPEED_SYNONYMS = {
+                        "慢动作": ["慢动作", "缓慢", "慢慢", "减速", "放慢"],
+                        "慢":     ["缓慢", "慢慢", "减速", "放慢"],
+                        "正常":   None,    # default — don't enforce
+                        "中":     None,
+                        "快速":   ["迅速", "快速", "急", "突然", "加速", "猛"],
+                        "快":     ["迅速", "快速", "急", "突然", "加速", "猛"],
+                    }
+                    speed_val = (item.get("axes_values") or {}).get("速度类型") \
+                                or (item.get("axes_values") or {}).get("动作速度")
+                    if speed_val:
+                        synonyms = SPEED_SYNONYMS.get(speed_val.strip())
+                        if synonyms and not any(s in prompt_zh for s in synonyms):
+                            continue
 
                     # Dynamic-quality gate: reject prompts that describe a still image
                     motion_hits = count_kw(prompt_zh, MOTION_VERB_KW)
