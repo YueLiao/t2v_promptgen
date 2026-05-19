@@ -336,6 +336,83 @@ async def view_run(request: Request, run_id: str):
     return templates.TemplateResponse(request, template, _ctx(run, **extra))
 
 
+@app.post("/runs/{run_id}/goto/{target}")
+async def goto_phase(run_id: str, target: str):
+    """Jump back to an earlier phase, clearing forward state.
+
+    Going back to:
+    - P1_DIMENSIONS: keep slug + sl2_list + axes (user can edit on dim page),
+      clear prompts + QA — they'll be regenerated.
+    - P2_PROMPTS: same as P1 — there's no standalone P2 page, so this lands
+      on the dimensions confirm flow.
+    - P3_QA: keep prompts, clear QA reports — re-runs P3 immediately.
+    - P4_REVIEW: keep everything (from P5 only).
+    """
+    run = _get_run(run_id)
+    try:
+        target_phase = Phase(target)
+    except ValueError:
+        raise HTTPException(400, f"Unknown phase: {target}")
+
+    current_idx = PHASE_ORDER.index(run.phase) if run.phase in PHASE_ORDER else 0
+    try:
+        target_idx = PHASE_ORDER.index(target_phase)
+    except ValueError:
+        raise HTTPException(400, f"Phase {target} not in PHASE_ORDER")
+
+    if target_idx > current_idx:
+        raise HTTPException(400, "Can only go back, not forward")
+    if target_idx == current_idx:
+        # No-op, but harmless
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+    # Discard forward state based on how far we're going back
+    if target_idx <= PHASE_ORDER.index(Phase.P1_DIMENSIONS):
+        # Going back to P1 or earlier — discard prompts + qa
+        run.prompts = []
+        RUN_QA_REPORTS.pop(run_id, None)
+        run.p4_round = 0
+    if target_idx <= PHASE_ORDER.index(Phase.P3_QA):
+        # Going back to P3 or earlier — discard QA results from each prompt
+        for p in run.prompts:
+            p.qa_rule_errors = []
+            p.qa_naturalness_zh = None
+            p.qa_naturalness_en = None
+            p.qa_naturalness_issues = []
+            p.qa_judged_sl2 = []
+            p.qa_coverage_match = None
+            p.qa_passed = True
+            p.needs_human_review = False
+        RUN_QA_REPORTS.pop(run_id, None)
+
+    # Special case: targeting P3 directly = re-run QA, then jump straight to P4
+    # (P3 has no standalone UI — generating.html flashes by)
+    if target_phase == Phase.P3_QA and run.prompts:
+        run.phase = Phase.P3_QA
+        try:
+            report = _try_real_qa(run_id, run)
+            RUN_QA_REPORTS[run_id] = {
+                "total": report.total, "passed": report.passed,
+                "pass_rate": report.pass_rate,
+                "fail_rules": report.fail_rules,
+                "fail_naturalness": report.fail_naturalness,
+                "fail_coverage": report.fail_coverage,
+                "naturalness_zh_avg": round(report.naturalness_zh_avg, 1),
+                "naturalness_en_avg": round(report.naturalness_en_avg, 1),
+                "stress_ratio": round(report.stress_ratio, 2),
+                "sl2_uncovered": report.sl2_uncovered,
+                "judges_ran": report.judges_ran,
+            }
+        except Exception as e:
+            RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
+        run.phase = Phase.P4_REVIEW
+    else:
+        run.phase = target_phase
+
+    run.updated_at = datetime.now()
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
 @app.post("/runs/{run_id}/slug")
 async def update_slug(run_id: str, slug: str = Form(...)):
     """Manually override the capability slug (snake_case ASCII required)."""

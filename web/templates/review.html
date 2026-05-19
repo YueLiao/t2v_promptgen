@@ -4,6 +4,22 @@
 {% block content %}
 <div class="space-y-6">
 
+  <!-- Back-to-previous-step row -->
+  <div class="flex items-center gap-2 text-sm">
+    <span class="text-slate-500">返回上一步重做:</span>
+    <form method="POST" action="/runs/{{ run.id }}/goto/P1_DIMENSIONS" class="inline"
+          onsubmit="return confirm('返回确定评测维度?现在的用例和质检结果会被清空,需要重新跑。')">
+      <button type="submit" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-lg text-xs">
+        ↺ 改检查项 / 测试变量
+      </button>
+    </form>
+    <form method="POST" action="/runs/{{ run.id }}/goto/P3_QA" class="inline">
+      <button type="submit" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-lg text-xs">
+        ↺ 重跑质检(保留用例)
+      </button>
+    </form>
+  </div>
+
   <!-- QA report panel -->
   {% if qa_report and qa_report.get("total") %}
   <div class="bg-white rounded-xl shadow-sm border border-slate-200">

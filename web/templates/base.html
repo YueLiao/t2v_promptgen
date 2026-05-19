@@ -42,20 +42,28 @@
         <span class="font-mono text-slate-800 text-xs">{{ run.model }}</span>
       </div>
     </div>
-    <!-- Phase tracker -->
+    <!-- Phase tracker (completed phases are clickable to go back) -->
     <div class="flex items-center gap-2 mt-2">
       {% for phase in phase_order %}
+      {% set is_current = run.phase.value == phase.value %}
+      {% set is_completed = phase_order.index(phase) < phase_order.index(run.phase) %}
       <div class="flex items-center">
+        {% if is_completed %}
+        <form method="POST" action="/runs/{{ run.id }}/goto/{{ phase.value }}" class="inline"
+              onsubmit="return confirm('返回 {{ phase_label[phase] }} 这一步?后面步骤的结果会被清空,需要重新跑。')">
+          <button type="submit"
+            class="phase-pill px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 hover:bg-green-200 hover:shadow cursor-pointer"
+            title="点击返回这一步(后面结果会清空)">
+            ↺ {{ phase_label[phase] }}
+          </button>
+        </form>
+        {% else %}
         <div class="phase-pill px-3 py-1 rounded-full text-xs font-medium
-          {% if run.phase.value == phase.value %}
-            bg-orange-500 text-white shadow
-          {% elif phase_order.index(phase) < phase_order.index(run.phase) %}
-            bg-green-100 text-green-800
-          {% else %}
-            bg-slate-100 text-slate-500
-          {% endif %}">
+          {% if is_current %}bg-orange-500 text-white shadow
+          {% else %}bg-slate-100 text-slate-500{% endif %}">
           {{ phase_label[phase] }}
         </div>
+        {% endif %}
         {% if not loop.last %}
         <div class="w-6 h-px bg-slate-300 mx-1"></div>
         {% endif %}
