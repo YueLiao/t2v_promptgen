@@ -211,6 +211,15 @@ class Run(BaseModel):
     p1_round: int = 0
     p1_max_rounds: int = 5
 
+    # P1 8-dimension tag recommendations (from annotation_schema D1-D8)
+    # Map: dim_code ("D1", "D2", ...) → list of value codes ("S1", "A30", ...)
+    # Populated by LLM in P1, editable by user in the dimensions UI.
+    recommended_tags: dict[str, list[str]] = Field(default_factory=dict)
+
+    # User-added custom tags (this-run-only, not promoted to global registry)
+    # Map: dim_code → list of {code, name_zh}
+    custom_tags: dict[str, list[dict]] = Field(default_factory=dict)
+
     # P2/P3 in-progress
     prompts: list[PromptEntry] = Field(default_factory=list)
     p2_round: int = 0

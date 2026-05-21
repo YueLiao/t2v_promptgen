@@ -285,7 +285,7 @@ async def create_run(
 
     # Try real LLM, fall back to mock — log loudly so silent failures are visible
     try:
-        run.sl2_list, run.axes = _try_real_dimensions(run_id, run)
+        run.sl2_list, run.axes, run.recommended_tags = _try_real_dimensions(run_id, run)
     except Exception as exc:
         import traceback
         err = f"[P1 LLM 调用失败 → 走 mock] slug={slug}  {type(exc).__name__}: {exc}"
@@ -295,6 +295,7 @@ async def create_run(
         run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
             description, round=0, capability_slug=slug
         )
+        run.recommended_tags = {}
 
     # Compute target set size from axes (decision C3)
     from ..phases.dimensions import compute_min_set_size
@@ -332,6 +333,10 @@ async def view_run(request: Request, run_id: str):
 
     if run.phase == Phase.P1_DIMENSIONS and RUN_DIM_CRITIQUE.get(run_id):
         extra["dim_critique"] = RUN_DIM_CRITIQUE[run_id]
+
+    if run.phase == Phase.P1_DIMENSIONS:
+        from ..core.annotation_schema import ALL_DIMENSIONS
+        extra["all_dimensions"] = ALL_DIMENSIONS
 
     return templates.TemplateResponse(request, template, _ctx(run, **extra))
 
@@ -413,6 +418,48 @@ async def goto_phase(run_id: str, target: str):
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
+@app.post("/runs/{run_id}/tags/toggle")
+async def toggle_tag(run_id: str, dim: str = Form(...), code: str = Form(...)):
+    """Toggle a tag in recommended_tags (add if absent, remove if present)."""
+    from ..core.annotation_schema import CODE_INDEX
+    run = _get_run(run_id)
+    if code not in CODE_INDEX:
+        raise HTTPException(400, f"Unknown tag code: {code}")
+    actual_dim = CODE_INDEX[code][0].code
+    if actual_dim != dim:
+        raise HTTPException(400, f"Code {code} belongs to {actual_dim}, not {dim}")
+    cur = run.recommended_tags.setdefault(dim, [])
+    if code in cur:
+        cur.remove(code)
+        if not cur:
+            del run.recommended_tags[dim]
+    else:
+        cur.append(code)
+    run.updated_at = datetime.now()
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+@app.post("/runs/{run_id}/tags/custom")
+async def add_custom_tag(run_id: str, dim: str = Form(...), name_zh: str = Form(...)):
+    """Add a user-defined tag for this run only (not added to global registry)."""
+    from ..core.annotation_schema import ALL_DIMENSIONS
+    run = _get_run(run_id)
+    dim_obj = next((d for d in ALL_DIMENSIONS if d.code == dim), None)
+    if not dim_obj:
+        raise HTTPException(400, f"Unknown dimension: {dim}")
+    name_zh = (name_zh or "").strip()
+    if not name_zh:
+        raise HTTPException(400, "Empty tag name")
+    # Generate a custom code: prefix + 'X' + index to avoid collisions
+    cur = run.custom_tags.setdefault(dim, [])
+    custom_code = f"{dim_obj.prefix}X{len(cur)+1}"
+    cur.append({"code": custom_code, "name_zh": name_zh})
+    # Also auto-select it
+    run.recommended_tags.setdefault(dim, []).append(custom_code)
+    run.updated_at = datetime.now()
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
 @app.post("/runs/{run_id}/slug")
 async def update_slug(run_id: str, slug: str = Form(...)):
     """Manually override the capability slug (snake_case ASCII required)."""
@@ -448,7 +495,9 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
 
     run.p1_round += 1
     try:
-        run.sl2_list, run.axes = _try_real_dimensions(run_id, run, feedback=free_text)
+        run.sl2_list, run.axes, new_rec = _try_real_dimensions(run_id, run, feedback=free_text)
+        # Merge: keep user's manual selections (in custom_tags), refresh LLM recs
+        run.recommended_tags = new_rec
     except Exception:
         run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
             run.user_description, round=run.p1_round, feedback=free_text,

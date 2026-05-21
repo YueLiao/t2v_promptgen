@@ -36,15 +36,18 @@ def build_client(provider: str, model: str, api_key: str,
 # Phase 0/1 — dimensions
 # ---------------------------------------------------------------------------
 
-_DIMENSIONS_SYSTEM = """你是 T2V(文生视频)模型评测专家。用户会描述一个想测试的"专项能力",你需要生成:
-1. SL2 列表(专项能力下要测的具体失败模式,每条 6-20 个)
-2. axes 列表(测试变量,3-6 个,每个 2-6 个取值,axes 之间正交)
+_DIMENSIONS_SYSTEM = """你是 T2V(文生视频)模型评测专家。用户会描述一个想测试的"专项能力",你需要生成三样东西:
+
+1. **SL2 列表**(专项能力下要测的具体失败模式,每条 6-20 个)
+2. **axes 列表**(测试变量,3-6 个,每个 2-6 个取值,axes 之间正交)
+3. **recommended_tags**(8 维标签推荐 — 从给定的 D1-D8 词表里挑出和这个评测任务相关的 tag 子集)
 
 严格规则:
 - SL2.id 是 snake_case 英文,name 是中文
 - 每个 SL2 必须能被评测员明确判定 Yes/No
 - axes 是会显著影响失败概率的控制变量,不是"题材分类"
-- 输出必须是合法的 JSON,顶层有 sl2_list 和 axes 两个键
+- **recommended_tags 必须严格从给定词表里挑**,每维选 0-N 个,不相关的维度可以留空
+- 输出必须是合法 JSON,顶层有 sl2_list / axes / recommended_tags 三个键
 - 不要在 JSON 外包裹任何文本,不要用 markdown 代码块
 
 输出 schema:
@@ -61,8 +64,16 @@ _DIMENSIONS_SYSTEM = """你是 T2V(文生视频)模型评测专家。用户会�
   ],
   "axes": [
     {"name": "中文轴名", "values": ["值1", "值2", "值3"]}
-  ]
-}"""
+  ],
+  "recommended_tags": {
+    "D1": ["S1"],
+    "D2": ["A14", "A30"],
+    "D3": ["V2", "V3"],
+    "D5": ["F1", "F2"]
+  }
+}
+
+注意:recommended_tags 的 key 必须是 D1-D8,value 必须是该维度词表里的有效 code(以 S/A/V/C/F/E/Y/G 开头)。不要发明新 code。"""
 
 
 def generate_dimensions_real(
@@ -72,12 +83,18 @@ def generate_dimensions_real(
     previous_axes: list[Axis] | None = None,
     feedback: str = "",
     round_idx: int = 0,
-) -> tuple[list[SL2], list[Axis]]:
-    """Generate SL2 + axes via real LLM.
+) -> tuple[list[SL2], list[Axis], dict[str, list[str]]]:
+    """Generate SL2 + axes + recommended_tags via real LLM.
 
+    Returns (sl2_list, axes, recommended_tags).
+    recommended_tags is a dict[dim_code] → list[value_code], possibly empty.
     Falls back to mock on parse failure (caller catches).
     """
+    from ..core.annotation_schema import format_for_llm, validate_recommended_tags
+
     user_msg = f"专项能力描述:\n{description}\n\n"
+    user_msg += "可选 8 维标签词表(recommended_tags 必须从这里挑):\n"
+    user_msg += format_for_llm() + "\n\n"
 
     if round_idx > 0 and previous_sl2:
         user_msg += "上一轮已生成:\n"
@@ -85,7 +102,7 @@ def generate_dimensions_real(
         user_msg += "Axes: " + ", ".join(a.name for a in previous_axes or []) + "\n\n"
     if feedback:
         user_msg += f"用户反馈意见:\n{feedback}\n\n"
-    user_msg += "请给出当前最佳的 SL2 列表 + axes,严格按 JSON schema 输出。"
+    user_msg += "请给出当前最佳的 SL2 列表 + axes + recommended_tags,严格按 JSON schema 输出。"
 
     resp = client.generate(
         messages=[{"role": "user", "content": user_msg}],
@@ -121,9 +138,11 @@ def generate_dimensions_real(
         except Exception:
             continue
 
+    rec_tags = validate_recommended_tags(data.get("recommended_tags") or {})
+
     if not sl2_list or not axes:
         raise ValueError("LLM returned empty sl2_list or axes")
-    return sl2_list, axes
+    return sl2_list, axes, rec_tags
 
 
 # ---------------------------------------------------------------------------
