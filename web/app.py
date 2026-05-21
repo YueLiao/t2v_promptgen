@@ -286,6 +286,8 @@ async def create_run(
     # Try real LLM, fall back to mock — log loudly so silent failures are visible
     try:
         run.sl2_list, run.axes, run.recommended_tags = _try_real_dimensions(run_id, run)
+        # Freeze a copy as the AI's original recommendation (for UI markers)
+        run.original_ai_tags = {k: list(v) for k, v in run.recommended_tags.items()}
     except Exception as exc:
         import traceback
         err = f"[P1 LLM 调用失败 → 走 mock] slug={slug}  {type(exc).__name__}: {exc}"
@@ -296,6 +298,7 @@ async def create_run(
             description, round=0, capability_slug=slug
         )
         run.recommended_tags = {}
+        run.original_ai_tags = {}
 
     # Compute target set size from axes (decision C3)
     from ..phases.dimensions import compute_min_set_size
@@ -504,8 +507,9 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
     run.p1_round += 1
     try:
         run.sl2_list, run.axes, new_rec = _try_real_dimensions(run_id, run, feedback=free_text)
-        # Merge: keep user's manual selections (in custom_tags), refresh LLM recs
         run.recommended_tags = new_rec
+        # Refresh AI baseline on regenerate (fresh recommendation)
+        run.original_ai_tags = {k: list(v) for k, v in new_rec.items()}
     except Exception:
         run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
             run.user_description, round=run.p1_round, feedback=free_text,

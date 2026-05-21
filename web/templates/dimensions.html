@@ -316,10 +316,16 @@
     <!-- 8-dim recommended tags (Alpine + fetch, no page reload) -->
     {% if all_dimensions %}
     <div class="bg-white rounded-xl shadow-sm border border-slate-200"
-         x-data="tagPanel({{ run.recommended_tags|tojson }}, {{ run.custom_tags|tojson }})">
+         x-data="tagPanel({{ run.recommended_tags|tojson }}, {{ run.custom_tags|tojson }}, {{ run.original_ai_tags|tojson }})">
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-bold text-slate-900">推荐标签(8 维统一词表)</h2>
         <p class="text-xs text-slate-500">AI 已勾选相关项。点 chip 切换 — 即点即存,不刷新。"+ 自定义"补充本任务专属 tag。</p>
+        <div class="flex flex-wrap items-center gap-3 mt-2 text-xs text-slate-500">
+          <span class="inline-flex items-center gap-1"><span class="w-3 h-3 rounded bg-orange-500"></span>已选</span>
+          <span class="inline-flex items-center gap-1"><span class="w-3 h-3 rounded bg-white border border-slate-300"></span>未选</span>
+          <span class="inline-flex items-center gap-1"><span class="text-orange-500">★</span> = AI 推荐(取消后这里仍标)</span>
+          <span class="inline-flex items-center gap-1"><span class="w-3 h-3 rounded bg-purple-500"></span>自定义</span>
+        </div>
       </div>
       <div class="divide-y divide-slate-100">
         {% for d in all_dimensions %}
@@ -332,8 +338,10 @@
                 选 <span x-text="selected['{{ d.code }}']?.length || 0"></span> 项
               </span>
               <template x-for="code in (selected['{{ d.code }}'] || []).slice(0, 5)" :key="code">
-                <span class="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-700"
-                      x-text="code + ' ' + nameOf('{{ d.code }}', code)"></span>
+                <span class="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-700 inline-flex items-center gap-1">
+                  <span x-show="isAi('{{ d.code }}', code)" class="text-orange-500" title="AI 推荐">★</span>
+                  <span x-text="code + ' ' + nameOf('{{ d.code }}', code)"></span>
+                </span>
               </template>
               <span class="text-xs text-slate-400"
                     x-show="(selected['{{ d.code }}']?.length || 0) > 5"
@@ -348,11 +356,14 @@
             <div class="flex flex-wrap gap-1.5">
               {% for v in d.values %}
               <button type="button" @click="toggle('{{ d.code }}', '{{ v.code }}')"
-                class="text-xs px-2 py-1 rounded border transition"
+                class="text-xs px-2 py-1 rounded border transition inline-flex items-center gap-1"
                 :class="(selected['{{ d.code }}'] || []).includes('{{ v.code }}')
                   ? 'bg-orange-500 text-white border-orange-500 hover:bg-orange-600'
-                  : 'bg-white text-slate-700 border-slate-300 hover:border-orange-400 hover:bg-orange-50'">
-                {{ v.code }} {{ v.name_zh }}
+                  : (isAi('{{ d.code }}', '{{ v.code }}')
+                      ? 'bg-white text-orange-700 border-orange-300 hover:bg-orange-50'
+                      : 'bg-white text-slate-700 border-slate-300 hover:border-orange-400 hover:bg-orange-50')">
+                <span x-show="isAi('{{ d.code }}', '{{ v.code }}')" title="AI 推荐过这一项">★</span>
+                <span>{{ v.code }} {{ v.name_zh }}</span>
               </button>
               {% endfor %}
               <template x-for="c in (customs['{{ d.code }}'] || [])" :key="c.code">
@@ -390,10 +401,14 @@
       {% endfor %}
     };
 
-    function tagPanel(initialSelected, initialCustoms) {
+    function tagPanel(initialSelected, initialCustoms, initialAiTags) {
       return {
         selected: initialSelected || {},
         customs: initialCustoms || {},
+        aiTags: initialAiTags || {},
+        isAi(dim, code) {
+          return (this.aiTags[dim] || []).includes(code);
+        },
         nameOf(dim, code) {
           if (TAG_NAMES[dim] && TAG_NAMES[dim][code]) return TAG_NAMES[dim][code];
           // Custom code lookup

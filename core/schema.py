@@ -216,6 +216,10 @@ class Run(BaseModel):
     # Populated by LLM in P1, editable by user in the dimensions UI.
     recommended_tags: dict[str, list[str]] = Field(default_factory=dict)
 
+    # Frozen snapshot of the original LLM recommendation (before any user edits)
+    # Used to show "AI 推" markers in the UI even after user toggles
+    original_ai_tags: dict[str, list[str]] = Field(default_factory=dict)
+
     # User-added custom tags (this-run-only, not promoted to global registry)
     # Map: dim_code → list of {code, name_zh}
     custom_tags: dict[str, list[dict]] = Field(default_factory=dict)
