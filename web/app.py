@@ -246,7 +246,7 @@ async def create_run(
         try:
             intake_client = llm_phases.build_client(
                 provider=provider,
-                model=model_p1,            # analysis model picks slug
+                model=model_p2,            # use fast model — intake is just classification
                 api_key=api_key,
                 base_url=base_url or None,
             )
@@ -420,44 +420,52 @@ async def goto_phase(run_id: str, target: str):
 
 @app.post("/runs/{run_id}/tags/toggle")
 async def toggle_tag(run_id: str, dim: str = Form(...), code: str = Form(...)):
-    """Toggle a tag in recommended_tags (add if absent, remove if present)."""
+    """Toggle a tag in recommended_tags. Returns JSON for AJAX use."""
     from ..core.annotation_schema import CODE_INDEX
     run = _get_run(run_id)
-    if code not in CODE_INDEX:
-        raise HTTPException(400, f"Unknown tag code: {code}")
-    actual_dim = CODE_INDEX[code][0].code
-    if actual_dim != dim:
-        raise HTTPException(400, f"Code {code} belongs to {actual_dim}, not {dim}")
+    # Allow custom codes (not in CODE_INDEX) — they're stored in run.custom_tags
+    if code in CODE_INDEX:
+        actual_dim = CODE_INDEX[code][0].code
+        if actual_dim != dim:
+            return JSONResponse(
+                {"ok": False, "error": f"Code {code} belongs to {actual_dim}, not {dim}"},
+                status_code=400,
+            )
     cur = run.recommended_tags.setdefault(dim, [])
     if code in cur:
         cur.remove(code)
+        selected = False
         if not cur:
             del run.recommended_tags[dim]
     else:
         cur.append(code)
+        selected = True
     run.updated_at = datetime.now()
-    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+    return JSONResponse({"ok": True, "dim": dim, "code": code, "selected": selected,
+                         "all_selected": run.recommended_tags.get(dim, [])})
 
 
 @app.post("/runs/{run_id}/tags/custom")
 async def add_custom_tag(run_id: str, dim: str = Form(...), name_zh: str = Form(...)):
-    """Add a user-defined tag for this run only (not added to global registry)."""
+    """Add a user-defined tag for this run only. Returns JSON for AJAX use."""
     from ..core.annotation_schema import ALL_DIMENSIONS
     run = _get_run(run_id)
     dim_obj = next((d for d in ALL_DIMENSIONS if d.code == dim), None)
     if not dim_obj:
-        raise HTTPException(400, f"Unknown dimension: {dim}")
+        return JSONResponse({"ok": False, "error": f"Unknown dimension: {dim}"}, status_code=400)
     name_zh = (name_zh or "").strip()
     if not name_zh:
-        raise HTTPException(400, "Empty tag name")
-    # Generate a custom code: prefix + 'X' + index to avoid collisions
+        return JSONResponse({"ok": False, "error": "Empty tag name"}, status_code=400)
     cur = run.custom_tags.setdefault(dim, [])
     custom_code = f"{dim_obj.prefix}X{len(cur)+1}"
     cur.append({"code": custom_code, "name_zh": name_zh})
-    # Also auto-select it
     run.recommended_tags.setdefault(dim, []).append(custom_code)
     run.updated_at = datetime.now()
-    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+    return JSONResponse({
+        "ok": True, "dim": dim, "code": custom_code, "name_zh": name_zh,
+        "all_selected": run.recommended_tags.get(dim, []),
+        "all_customs": run.custom_tags.get(dim, []),
+    })
 
 
 @app.post("/runs/{run_id}/slug")

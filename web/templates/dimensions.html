@@ -313,36 +313,31 @@
       </div>
     </div>
 
-    <!-- 8-dim recommended tags -->
+    <!-- 8-dim recommended tags (Alpine + fetch, no page reload) -->
     {% if all_dimensions %}
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200"
+         x-data="tagPanel({{ run.recommended_tags|tojson }}, {{ run.custom_tags|tojson }})">
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-bold text-slate-900">推荐标签(8 维统一词表)</h2>
-        <p class="text-xs text-slate-500">AI 已勾选了它认为相关的项。可以展开各维加减,也能"+ 自定义"补充。这些 tag 会作为下一步生成时的覆盖目标 — 每个勾选的 tag 至少出现在一条用例里。</p>
+        <p class="text-xs text-slate-500">AI 已勾选相关项。点 chip 切换 — 即点即存,不刷新。"+ 自定义"补充本任务专属 tag。</p>
       </div>
       <div class="divide-y divide-slate-100">
         {% for d in all_dimensions %}
-        {% set selected = run.recommended_tags.get(d.code, []) %}
-        {% set customs = run.custom_tags.get(d.code, []) %}
         <div class="px-6 py-3" x-data="{ open: false }">
           <div class="flex items-center justify-between gap-2 cursor-pointer" @click="open = !open">
             <div class="flex items-center gap-3 flex-wrap">
               <span class="text-sm font-semibold text-slate-900">{{ d.code }} {{ d.name_zh }}</span>
-              <span class="text-xs px-2 py-0.5 rounded-full
-                {% if selected|length > 0 %}bg-orange-100 text-orange-700{% else %}bg-slate-100 text-slate-500{% endif %}">
-                选 {{ selected|length }} 项
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                :class="(selected['{{ d.code }}']?.length || 0) > 0 ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'">
+                选 <span x-text="selected['{{ d.code }}']?.length || 0"></span> 项
               </span>
-              {% if selected %}
-              <div class="flex flex-wrap gap-1">
-                {% for code in selected[:5] %}
-                {% set found_name = none %}
-                {% for v in d.values %}{% if v.code == code %}{% set found_name = v.name_zh %}{% endif %}{% endfor %}
-                {% for c in customs %}{% if c.code == code %}{% set found_name = c.name_zh + ' (自定义)' %}{% endif %}{% endfor %}
-                <span class="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-700">{{ code }} {{ found_name }}</span>
-                {% endfor %}
-                {% if selected|length > 5 %}<span class="text-xs text-slate-400">+{{ selected|length - 5 }}</span>{% endif %}
-              </div>
-              {% endif %}
+              <template x-for="code in (selected['{{ d.code }}'] || []).slice(0, 5)" :key="code">
+                <span class="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-700"
+                      x-text="code + ' ' + nameOf('{{ d.code }}', code)"></span>
+              </template>
+              <span class="text-xs text-slate-400"
+                    x-show="(selected['{{ d.code }}']?.length || 0) > 5"
+                    x-text="'+' + ((selected['{{ d.code }}']?.length || 0) - 5)"></span>
             </div>
             <span class="text-xs text-slate-400">
               <span x-show="!open">展开 ▼</span>
@@ -352,49 +347,104 @@
           <div x-show="open" x-cloak class="mt-3 space-y-2">
             <div class="flex flex-wrap gap-1.5">
               {% for v in d.values %}
-              <form method="POST" action="/runs/{{ run.id }}/tags/toggle" class="inline">
-                <input type="hidden" name="dim" value="{{ d.code }}">
-                <input type="hidden" name="code" value="{{ v.code }}">
-                <button type="submit"
-                  class="text-xs px-2 py-1 rounded border transition
-                    {% if v.code in selected %}bg-orange-500 text-white border-orange-500 hover:bg-orange-600
-                    {% else %}bg-white text-slate-700 border-slate-300 hover:border-orange-400 hover:bg-orange-50{% endif %}"
-                  title="{{ v.code }} {{ v.name_zh }}">
-                  {{ v.code }} {{ v.name_zh }}
-                </button>
-              </form>
+              <button type="button" @click="toggle('{{ d.code }}', '{{ v.code }}')"
+                class="text-xs px-2 py-1 rounded border transition"
+                :class="(selected['{{ d.code }}'] || []).includes('{{ v.code }}')
+                  ? 'bg-orange-500 text-white border-orange-500 hover:bg-orange-600'
+                  : 'bg-white text-slate-700 border-slate-300 hover:border-orange-400 hover:bg-orange-50'">
+                {{ v.code }} {{ v.name_zh }}
+              </button>
               {% endfor %}
-              {% for c in customs %}
-              <form method="POST" action="/runs/{{ run.id }}/tags/toggle" class="inline">
-                <input type="hidden" name="dim" value="{{ d.code }}">
-                <input type="hidden" name="code" value="{{ c.code }}">
-                <button type="submit"
-                  class="text-xs px-2 py-1 rounded border transition
-                    {% if c.code in selected %}bg-purple-500 text-white border-purple-500 hover:bg-purple-600
-                    {% else %}bg-white text-purple-700 border-purple-300 hover:bg-purple-50{% endif %}"
-                  title="自定义 {{ c.code }} {{ c.name_zh }}">
-                  {{ c.code }} {{ c.name_zh }}
+              <template x-for="c in (customs['{{ d.code }}'] || [])" :key="c.code">
+                <button type="button" @click="toggle('{{ d.code }}', c.code)"
+                  class="text-xs px-2 py-1 rounded border transition"
+                  :class="(selected['{{ d.code }}'] || []).includes(c.code)
+                    ? 'bg-purple-500 text-white border-purple-500 hover:bg-purple-600'
+                    : 'bg-white text-purple-700 border-purple-300 hover:bg-purple-50'">
+                  <span x-text="c.code + ' ' + c.name_zh"></span>
                 </button>
-              </form>
-              {% endfor %}
+              </template>
             </div>
-            <form method="POST" action="/runs/{{ run.id }}/tags/custom" class="flex gap-2 items-center mt-2">
-              <input type="hidden" name="dim" value="{{ d.code }}">
-              <input type="text" name="name_zh" placeholder="+ 自定义 tag(只本任务用)"
+            <div class="flex gap-2 items-center mt-2" x-data="{ name: '' }">
+              <input type="text" x-model="name" placeholder="+ 自定义 tag(只本任务用)"
+                @keydown.enter.prevent="if (name.trim()) { addCustom('{{ d.code }}', name); name = ''; }"
                 class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs">
-              <button type="submit" class="bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded">添加</button>
-            </form>
+              <button type="button"
+                @click="if (name.trim()) { addCustom('{{ d.code }}', name); name = ''; }"
+                class="bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded">添加</button>
+            </div>
           </div>
         </div>
         {% endfor %}
       </div>
       <div class="px-6 py-3 bg-slate-50 border-t border-slate-200 text-xs text-slate-600">
-        共
-        {% set ns = namespace(total=0) %}
-        {% for d in all_dimensions %}{% set ns.total = ns.total + (run.recommended_tags.get(d.code, [])|length) %}{% endfor %}
-        <span class="font-medium">{{ ns.total }}</span> 个 tag 被选中,生成用例时会被作为覆盖目标
+        共 <span class="font-medium" x-text="totalSelected()"></span> 个 tag 被选中,生成用例时会作为覆盖目标
       </div>
     </div>
+
+    <script>
+    // Static name lookup table (rendered once on page load)
+    const TAG_NAMES = {
+      {% for d in all_dimensions %}
+      "{{ d.code }}": { {% for v in d.values %}"{{ v.code }}": "{{ v.name_zh }}",{% endfor %} }{% if not loop.last %},{% endif %}
+      {% endfor %}
+    };
+
+    function tagPanel(initialSelected, initialCustoms) {
+      return {
+        selected: initialSelected || {},
+        customs: initialCustoms || {},
+        nameOf(dim, code) {
+          if (TAG_NAMES[dim] && TAG_NAMES[dim][code]) return TAG_NAMES[dim][code];
+          // Custom code lookup
+          const cs = this.customs[dim] || [];
+          const c = cs.find(x => x.code === code);
+          return c ? c.name_zh + ' (自定义)' : code;
+        },
+        totalSelected() {
+          return Object.values(this.selected).reduce((a, b) => a + b.length, 0);
+        },
+        async toggle(dim, code) {
+          // Optimistic UI update
+          if (!this.selected[dim]) this.selected[dim] = [];
+          const idx = this.selected[dim].indexOf(code);
+          if (idx >= 0) this.selected[dim].splice(idx, 1);
+          else this.selected[dim].push(code);
+          if (this.selected[dim].length === 0) delete this.selected[dim];
+          // Persist to server
+          const form = new FormData();
+          form.append('dim', dim);
+          form.append('code', code);
+          try {
+            const r = await fetch(`/runs/{{ run.id }}/tags/toggle`, {method: 'POST', body: form});
+            if (!r.ok) throw new Error(await r.text());
+          } catch (e) {
+            // Rollback on error
+            console.error('toggle failed', e);
+            if (idx >= 0) (this.selected[dim] = this.selected[dim] || []).push(code);
+            else this.selected[dim].splice(this.selected[dim].indexOf(code), 1);
+          }
+        },
+        async addCustom(dim, name) {
+          const form = new FormData();
+          form.append('dim', dim);
+          form.append('name_zh', name);
+          try {
+            const r = await fetch(`/runs/{{ run.id }}/tags/custom`, {method: 'POST', body: form});
+            const data = await r.json();
+            if (!data.ok) throw new Error(data.error || 'failed');
+            // Update local state with server response
+            if (!this.customs[dim]) this.customs[dim] = [];
+            this.customs[dim] = data.all_customs;
+            this.selected[dim] = data.all_selected;
+          } catch (e) {
+            console.error('addCustom failed', e);
+            alert('自定义添加失败:' + e.message);
+          }
+        }
+      };
+    }
+    </script>
     {% endif %}
   </div>
 
