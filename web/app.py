@@ -286,7 +286,9 @@ async def create_run(
     # Try real LLM, fall back to mock — log loudly so silent failures are visible
     try:
         run.sl2_list, run.axes, run.recommended_tags = _try_real_dimensions(run_id, run)
-        # Freeze a copy as the AI's original recommendation (for UI markers)
+        # If LLM didn't return any tag recommendations, use slug-based defaults
+        if not run.recommended_tags:
+            run.recommended_tags = mock_data.default_recommended_tags(slug)
         run.original_ai_tags = {k: list(v) for k, v in run.recommended_tags.items()}
     except Exception as exc:
         import traceback
@@ -297,8 +299,8 @@ async def create_run(
         run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
             description, round=0, capability_slug=slug
         )
-        run.recommended_tags = {}
-        run.original_ai_tags = {}
+        run.recommended_tags = mock_data.default_recommended_tags(slug)
+        run.original_ai_tags = {k: list(v) for k, v in run.recommended_tags.items()}
 
     # Compute target set size from axes (decision C3)
     from ..phases.dimensions import compute_min_set_size
@@ -507,14 +509,17 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
     run.p1_round += 1
     try:
         run.sl2_list, run.axes, new_rec = _try_real_dimensions(run_id, run, feedback=free_text)
+        if not new_rec:
+            new_rec = mock_data.default_recommended_tags(run.capability_slug)
         run.recommended_tags = new_rec
-        # Refresh AI baseline on regenerate (fresh recommendation)
         run.original_ai_tags = {k: list(v) for k, v in new_rec.items()}
     except Exception:
         run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
             run.user_description, round=run.p1_round, feedback=free_text,
             capability_slug=run.capability_slug
         )
+        run.recommended_tags = mock_data.default_recommended_tags(run.capability_slug)
+        run.original_ai_tags = {k: list(v) for k, v in run.recommended_tags.items()}
     # Recompute target_set_size based on updated axes
     from ..phases.dimensions import compute_min_set_size
     run.target_set_size = compute_min_set_size(run.axes)

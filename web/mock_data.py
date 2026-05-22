@@ -161,6 +161,67 @@ _CAPABILITY_TEMPLATES = {
 }
 
 
+# Fallback recommended_tags per capability slug — used when LLM doesn't return
+# a tag suggestion (or falls back to mock dimensions). Each entry maps
+# dim_code → list of value codes from annotation_schema.
+_DEFAULT_RECOMMENDED_TAGS = {
+    "human_hand": {
+        "D1": ["S1", "S2"],
+        "D2": ["A9", "A14", "A30"],
+        "D3": ["V2", "V3"],
+        "D4": ["C1", "C12"],
+        "D5": ["F1", "F2"],
+        "D8": ["G3"],
+    },
+    "human_body": {
+        "D1": ["S1", "S2"],
+        "D2": ["A1", "A6", "A10", "A17", "A22"],
+        "D3": ["V2", "V3", "V4"],
+        "D4": ["C1", "C4"],
+        "D5": ["F3", "F4"],
+        "D8": ["G2"],
+    },
+    "camera_motion": {
+        "D1": ["S3"],
+        "D4": ["C2", "C3", "C4", "C5", "C6", "C7", "C11"],
+        "D5": ["F3", "F4", "F5"],
+        "D6": ["E1", "E2"],
+        "D8": ["G1", "G6"],
+    },
+    "physics": {
+        "D1": ["S3"],
+        "D2": ["A13", "A24", "A25", "A26", "A28"],
+        "D3": ["V3", "V4", "V6"],
+        "D4": ["C1", "C12"],
+        "D5": ["F1", "F2", "F3"],
+        "D8": ["G3"],
+    },
+    "temporal_consistency": {
+        "D1": ["S1", "S2", "S4", "S5"],
+        "D2": ["A9", "A13", "A23", "A24", "A26", "A32"],
+        "D3": ["V2", "V3", "V4", "V6"],
+        "D4": ["C1", "C4"],
+        "D5": ["F2", "F3"],
+        "D8": ["G2", "G3"],
+    },
+    "text_rendering": {
+        "D1": ["S3"],
+        "D2": ["A33"],
+        "D5": ["F1", "F2"],
+        "D6": ["E2", "E5", "E15"],
+        "D8": ["G3"],
+    },
+}
+
+
+def default_recommended_tags(capability_slug: str) -> dict[str, list[str]]:
+    """Return a sensible fallback recommended_tags dict for a capability slug.
+
+    Empty dict for unknown slugs.
+    """
+    return {k: list(v) for k, v in _DEFAULT_RECOMMENDED_TAGS.get(capability_slug, {}).items()}
+
+
 def generate_mock_dimensions(description: str, round: int = 0,
                               feedback: str = "",
                               capability_slug: str = "") -> tuple[list[SL2], list[Axis]]:
