@@ -121,7 +121,7 @@
       <ul class="space-y-1 text-xs">
         {% for r in dim_critique.redundancies %}
         <li class="text-slate-700">
-          {% for sid in r.items %}<code class="bg-slate-100 px-1 rounded">{{ sid }}</code>{% if not loop.last %} ↔ {% endif %}{% endfor %}
+          {% for sid in r['items'] %}<code class="bg-slate-100 px-1 rounded">{{ sid }}</code>{% if not loop.last %} ↔ {% endif %}{% endfor %}
           — {{ r.issue }}
         </li>
         {% endfor %}

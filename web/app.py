@@ -244,7 +244,7 @@ async def index(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.post("/runs")
-async def create_run(
+def create_run(
     background_tasks: BackgroundTasks,
     description: str = Form(...),
     set_size: str = Form("auto"),
@@ -373,7 +373,7 @@ async def view_run(request: Request, run_id: str):
 
 
 @app.post("/runs/{run_id}/goto/{target}")
-async def goto_phase(run_id: str, target: str):
+def goto_phase(run_id: str, target: str):
     """Jump back to an earlier phase, clearing forward state.
 
     Going back to:
@@ -523,14 +523,14 @@ async def update_slug(run_id: str, slug: str = Form(...)):
 # ---------------------------------------------------------------------------
 
 @app.post("/runs/{run_id}/p1/regenerate")
-async def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_text: str = Form("")):
+def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_text: str = Form("")):
     run = _get_run(run_id)
     if run.phase != Phase.P1_DIMENSIONS:
         raise HTTPException(400, "Not in P1")
 
     if run.p1_round >= run.p1_max_rounds:
         # Force confirm
-        return await p1_confirm(run_id)
+        return p1_confirm(run_id)
 
     run.p1_round += 1
     try:
@@ -557,7 +557,7 @@ async def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_tex
 
 
 @app.post("/runs/{run_id}/p1/confirm")
-async def p1_confirm(run_id: str):
+def p1_confirm(run_id: str):
     run = _get_run(run_id)
 
     # ---- P2: generate prompts ----
@@ -599,7 +599,7 @@ async def p1_confirm(run_id: str):
 
 
 @app.post("/runs/{run_id}/p4/rerun_qa")
-async def p4_rerun_qa(run_id: str):
+def p4_rerun_qa(run_id: str):
     """Re-run the QA pass on the current prompts. Useful after user edits."""
     run = _get_run(run_id)
     try:
@@ -651,10 +651,10 @@ async def p4_drop_prompt(run_id: str, prompt_id: str):
 
 
 @app.post("/runs/{run_id}/p4/regenerate")
-async def p4_regenerate(run_id: str, free_text: str = Form("")):
+def p4_regenerate(run_id: str, free_text: str = Form("")):
     run = _get_run(run_id)
     if run.p4_round >= run.p4_max_rounds:
-        return await p4_confirm(run_id)
+        return p4_confirm(run_id)
     run.p4_round += 1
     # Mock regen: shuffle some prompts
     new_prompts = mock_data.generate_mock_prompts(
@@ -668,7 +668,7 @@ async def p4_regenerate(run_id: str, free_text: str = Form("")):
 
 
 @app.post("/runs/{run_id}/p4/confirm")
-async def p4_confirm(run_id: str):
+def p4_confirm(run_id: str):
     run = _get_run(run_id)
     run.phase = Phase.P5_EXPORT
     run.updated_at = datetime.now()
