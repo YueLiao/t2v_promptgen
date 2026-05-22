@@ -50,6 +50,14 @@
 </div>
 {% endif %}
 
+{% if dim_critique and dim_critique.get('pending') %}
+<div class="mb-4 rounded-xl border bg-slate-50 border-slate-200 px-5 py-3 flex items-center gap-3">
+  <div class="inline-block animate-spin h-4 w-4 border-2 border-slate-400 border-t-transparent rounded-full"></div>
+  <span class="text-sm text-slate-600">AI 维度评审中… 大约 10-15 秒,完成后这里会自动出现评分</span>
+  <meta http-equiv="refresh" content="5">
+</div>
+{% endif %}
+
 {% if dim_critique and dim_critique.judge_ran %}
 <div class="mb-4 rounded-xl border
   {% if dim_critique.verdict == 'good_to_go' %}bg-green-50 border-green-200

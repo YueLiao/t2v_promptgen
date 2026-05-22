@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -70,6 +70,7 @@ def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
 
 def _try_judge_dimensions(run_id: str, run: Run):
     """Judge the current dimensions design. Returns critique dict (always)."""
+    import time
     from ..qa.dimensions_judge import judge_dimensions
     creds = RUN_CREDS.get(run_id)
     client = None
@@ -77,23 +78,38 @@ def _try_judge_dimensions(run_id: str, run: Run):
         try:
             client = llm_phases.build_client(
                 provider=creds["provider"],
-                model=creds.get("model_p1") or creds["model"],   # analysis model = judge
+                model=creds.get("model_p2") or creds["model"],   # use cheap model for judge
                 api_key=creds["api_key"],
                 base_url=creds.get("base_url") or None,
             )
         except Exception as exc:
             print(f"[P1 judge client build failed] {exc}", flush=True)
     try:
+        t0 = time.time()
         critique = judge_dimensions(
             description=run.user_description or "",
             sl2_list=run.sl2_list,
             axes=run.axes,
             client=client,
         )
+        print(f"[LLM-timing] dim_judge done in {time.time()-t0:.1f}s  run_id={run_id}", flush=True)
         return critique.to_dict()
     except Exception as exc:
         print(f"[P1 judge failed] {exc}", flush=True)
         return {"judge_ran": False}
+
+
+def _run_dim_judge_background(run_id: str):
+    """Run dim judge in background, store result in RUN_DIM_CRITIQUE.
+
+    Called by BackgroundTasks after POST /runs / regenerate returns to user.
+    """
+    run = RUNS.get(run_id)
+    if not run:
+        return
+    # Mark as pending so UI knows to show spinner
+    RUN_DIM_CRITIQUE[run_id] = {"pending": True}
+    RUN_DIM_CRITIQUE[run_id] = _try_judge_dimensions(run_id, run)
 
 
 def _try_real_prompts(run_id: str, run: Run):
@@ -229,6 +245,7 @@ async def index(request: Request):
 
 @app.post("/runs")
 async def create_run(
+    background_tasks: BackgroundTasks,
     description: str = Form(...),
     set_size: str = Form("auto"),
     provider: str = Form("deepseek"),
@@ -255,10 +272,13 @@ async def create_run(
             intake_client = None
 
     from ..phases.intake import classify_with_fallback
+    import time
+    _t0 = time.time()
     intake = classify_with_fallback(description, client=intake_client)
     slug = intake["slug"]
-    print(f"[P0] slug={slug} confidence={intake['confidence']} "
-          f"source={intake.get('source')} is_new={intake.get('is_new')}", flush=True)
+    print(f"[LLM-timing] intake done in {time.time()-_t0:.1f}s  "
+          f"slug={slug} confidence={intake['confidence']} source={intake.get('source')}",
+          flush=True)
     RUN_INTAKE[run_id] = intake
 
     run = Run(
@@ -285,7 +305,11 @@ async def create_run(
 
     # Try real LLM, fall back to mock — log loudly so silent failures are visible
     try:
+        _t0 = time.time()
         run.sl2_list, run.axes, run.recommended_tags = _try_real_dimensions(run_id, run)
+        print(f"[LLM-timing] dimensions done in {time.time()-_t0:.1f}s  "
+              f"sl2={len(run.sl2_list)} axes={len(run.axes)} "
+              f"tags={sum(len(v) for v in run.recommended_tags.values())}", flush=True)
         # If LLM didn't return any tag recommendations, use slug-based defaults
         if not run.recommended_tags:
             run.recommended_tags = mock_data.default_recommended_tags(slug)
@@ -314,8 +338,10 @@ async def create_run(
 
     RUNS[run_id] = run
 
-    # P1 judge — critique the freshly-generated dimensions
-    RUN_DIM_CRITIQUE[run_id] = _try_judge_dimensions(run_id, run)
+    # P1 judge runs in background — don't block redirect (saves ~10-15s).
+    # UI will show "评审中..." until result lands.
+    RUN_DIM_CRITIQUE[run_id] = {"pending": True}
+    background_tasks.add_task(_run_dim_judge_background, run_id)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
@@ -497,7 +523,7 @@ async def update_slug(run_id: str, slug: str = Form(...)):
 # ---------------------------------------------------------------------------
 
 @app.post("/runs/{run_id}/p1/regenerate")
-async def p1_regenerate(run_id: str, free_text: str = Form("")):
+async def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_text: str = Form("")):
     run = _get_run(run_id)
     if run.phase != Phase.P1_DIMENSIONS:
         raise HTTPException(400, "Not in P1")
@@ -523,8 +549,9 @@ async def p1_regenerate(run_id: str, free_text: str = Form("")):
     # Recompute target_set_size based on updated axes
     from ..phases.dimensions import compute_min_set_size
     run.target_set_size = compute_min_set_size(run.axes)
-    # Re-judge the new design
-    RUN_DIM_CRITIQUE[run_id] = _try_judge_dimensions(run_id, run)
+    # Re-judge in background
+    RUN_DIM_CRITIQUE[run_id] = {"pending": True}
+    background_tasks.add_task(_run_dim_judge_background, run_id)
     run.updated_at = datetime.now()
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
