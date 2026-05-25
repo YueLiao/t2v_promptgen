@@ -324,7 +324,7 @@
     <!-- 8-dim recommended tags (Alpine + fetch, no page reload) -->
     {% if all_dimensions %}
     <div class="bg-white rounded-xl shadow-sm border border-slate-200"
-         x-data="tagPanel({{ run.recommended_tags|tojson }}, {{ run.custom_tags|tojson }}, {{ run.original_ai_tags|tojson }})">
+         x-data='tagPanel({{ run.recommended_tags|tojson }}, {{ run.custom_tags|tojson }}, {{ run.original_ai_tags|tojson }})'>
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-bold text-slate-900">推荐标签(8 维统一词表)</h2>
         <p class="text-xs text-slate-500">AI 已勾选相关项。点 chip 切换 — 即点即存,不刷新。"+ 自定义"补充本任务专属 tag。</p>

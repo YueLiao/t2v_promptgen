@@ -109,7 +109,7 @@ def generate_dimensions_real(
         system=_DIMENSIONS_SYSTEM,
         json_schema={"required": ["sl2_list", "axes"]},
         temperature=0.3,
-        max_tokens=4096,
+        max_tokens=8000,           # SL2 + axes + recommended_tags can exceed 4k
     )
 
     data = resp.content if isinstance(resp.content, dict) else json.loads(resp.content)
