@@ -23,6 +23,9 @@ runs.db
 *.sqlite
 .t2v_promptgen/
 
+# Smoke-test artifacts (regenerated each invocation, not stable)
+out/*.jsonl
+
 # Local secrets
 .env
 .env.*
