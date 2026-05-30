@@ -1381,6 +1381,64 @@ async def download_handbook_json(run_id: str):
     })
 
 
+@app.get("/runs/{run_id}/download/rewrite_diff.jsonl")
+async def download_rewrite_diff(run_id: str):
+    """Per-prompt diff report. Only meaningful for source='rewrite' runs.
+
+    One line per PromptEntry — original (from SourcePrompt) joined with
+    rewritten + diff text + keep/adherence scores + accept decision.
+    """
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Diff report only available for rewrite runs")
+
+    # Build {source_id: SourcePrompt} for quick lookup
+    sp_by_id = {sp.source_id: sp for sp in run.source_prompts}
+
+    lines: list[str] = []
+    for p in run.prompts:
+        sp = sp_by_id.get(p.source_id) if p.source_id else None
+        record = {
+            "id": p.id,
+            "source_id": p.source_id,
+            "original_text": sp.original_text if sp else None,
+            "original_text_en": sp.original_text_en if sp else None,
+            "original_metadata": sp.metadata if sp else None,
+            "prompt_zh": p.prompt_zh,
+            "prompt_en": p.prompt_en or None,
+            "rewrite_diff": p.rewrite_diff,
+            "rewrite_kept_score": p.rewrite_kept_score,
+            "rewrite_adherence_score": p.rewrite_adherence_score,
+            "rewrite_accepted": p.rewrite_accepted,
+            "qa_passed": p.qa_passed,
+            "qa_rule_errors": p.qa_rule_errors,
+            "subject_type": p.subject_type,
+            "subject_count": p.subject_count,
+            "difficulty": p.difficulty,
+            "is_stress": p.is_stress,
+        }
+        # Directive snapshot (same across all entries — included once via header
+        # would be lighter, but per-line keeps the file self-contained)
+        if run.rewrite_directive:
+            record["directive"] = {
+                "transforms": [
+                    {"id": t.id, "name_zh": t.name_zh, "params": t.params, "order": t.order}
+                    for t in run.rewrite_directive.transforms
+                ],
+                "free_text": run.rewrite_directive.free_text,
+                "target_capability": run.rewrite_directive.target_capability,
+            }
+        lines.append(json.dumps(record, ensure_ascii=False, default=str))
+
+    body = "\n".join(lines)
+    return Response(
+        body,
+        media_type="application/x-jsonlines",
+        headers={"Content-Disposition":
+                 f"attachment; filename=rewrite_diff_{run.id}.jsonl"},
+    )
+
+
 @app.get("/runs/{run_id}/download/coverage.json")
 async def download_coverage(run_id: str):
     run = _get_run(run_id)

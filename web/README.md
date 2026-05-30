@@ -18,6 +18,10 @@ uvicorn t2v_promptgen.web.app:app --reload --port 8765
 
 ## 操作流程
 
+首页 2 个 tab,选一种:
+
+### 🪄 从零生成(原有流程,P0-P5)
+
 1. **首页** → 填"想测什么能力" + API 密钥,点开始
 2. **确定评测维度页** → AI 列出检查项 + 测试变量,你看着满意点确认;不满意写意见点重新生成(最多 5 轮)
 3. **生成中页** → 系统批量写测试用例,几分钟
@@ -25,6 +29,17 @@ uvicorn t2v_promptgen.web.app:app --reload --port 8765
 5. **导出页** → 下载 4 个文件,带走
 
 不填 API 密钥也能跑 — 会用示例数据演示,产物质量一般,只为看流程。
+
+### 📋 改写已有 prompt(新流程,R0-R6)
+
+1. **上传** → 选 JSON/JSONL/TXT/CSV/XLSX 文件,最大 10MB / 5000 行;自动识别格式 + 编码
+2. **字段映射** → AI 猜哪一列是 prompt 文本、哪一列是 id;你可调整
+3. **改写指令** → 从 12 张卡片里选(主体替换 / 时序提升 / 因果链 / 风格转换 ...)+ 自由文本补充
+4. **改写中** → 异步批量改写,有进度,可取消
+5. **审核(diff 视图)** → 原 prompt ↔ 改写后并排显示 + keep/adherence 分数 + 单条接受/拒绝;拒绝的可以"让 AI 再改一遍"(最多 3 轮迭代)
+6. **导出** → prompts.jsonl + rewrite_diff.jsonl(原 ↔ 改写映射)
+
+详细设计:[`../docs/design_prompt_rewrite.md`](../docs/design_prompt_rewrite.md)
 
 ---
 
@@ -58,6 +73,23 @@ uvicorn t2v_promptgen.web.app:app --reload --port 8765
 | `/runs/{id}/delete` | POST | 删除任务 |
 | `/api/runs/{id}/state` | GET | 看任务完整 JSON 状态 |
 | `/api/llm/test` | POST | 测试 API 服务能否连通 |
+
+### 改写流(R0-R6 路由)
+
+| 路由 | 方法 | 用途 |
+|---|---|---|
+| `/rewrite/upload` | GET/POST | R0 上传页 + 解析 |
+| `/rewrite/{id}/map` | GET/POST | R1 字段映射 |
+| `/rewrite/{id}/mapping/guess` | GET | LLM 猜列名 |
+| `/rewrite/{id}/directive` | GET/POST | R2 卡片 + 自由文本 |
+| `/rewrite/cards` | GET | 12 张卡片 spec JSON |
+| `/rewrite/{id}/start` | POST | R3 启动异步改写 |
+| `/rewrite/{id}/cancel` | POST | 取消进行中的改写 |
+| `/rewrite/{id}/progress` | GET | 查询改写进度(轮询) |
+| `/rewrite/{id}/accept/{pid}` | POST | R5 单条接受/拒绝 |
+| `/rewrite/{id}/iterate` | POST | R5 让 AI 重改拒绝的(≤3 轮) |
+| `/rewrite/{id}/confirm` | POST | R5 通过 → 进 R6 导出 |
+| `/runs/{id}/download/rewrite_diff.jsonl` | GET | R6 diff 报告 |
 
 ---
 
