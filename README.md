@@ -98,17 +98,63 @@ T2V 生成 5 秒视频,如果 prompt 只描述一张静态图,模型就抓不到
 
 ## 怎么跑
 
-### 网页版(推荐,适合演示和真用)
+### 环境准备
+
+- **Python 3.10+**(项目里有 3.13 的语法,3.10 是底线)
+- pip 或 conda 任选
+
+**一键装依赖**:
 
 ```bash
-pip install fastapi uvicorn jinja2 python-multipart pydantic
-cd /path/to/t2v_benchmark
-uvicorn t2v_promptgen.web.app:app --reload --port 8765
+git clone https://github.com/YueLiao/t2v_promptgen.git
+cd t2v_promptgen
+pip install -r requirements.txt
 ```
 
-浏览器开 `http://localhost:8765`,按页面提示往下点就行。详细说明见 [`web/README.md`](web/README.md)。
+`requirements.txt` 涵盖 web、LLM 客户端、文件解析(`.xlsx` 需要 openpyxl)、测试工具。详细清单见仓库根的 `requirements.txt`。
 
-### 命令行(自动化/批量)
+### 跑起来
+
+```bash
+# 在 t2v_promptgen 的**上一级**目录(包含 t2v_promptgen/ 的目录)
+uvicorn t2v_promptgen.web.app:app --host 0.0.0.0 --port 8765
+```
+
+浏览器开 `http://localhost:8765`。
+
+> ⚠️ 一定从**上一级目录**起服务,否则 `from ..core.schema import ...` 这种相对导入会报 `attempted relative import beyond top-level package`。
+
+### 跑测试
+
+```bash
+# 在仓库根目录
+python -m pytest t2v_promptgen/tests/ -v
+
+# 带覆盖率
+python -m pytest t2v_promptgen/tests/ --cov=t2v_promptgen/parsers --cov=t2v_promptgen/core --cov-report=term-missing
+```
+
+当前覆盖:解析层 + schema 共 85%(57 个测试)。
+
+### 让 Claude Code 帮你做(推荐)
+
+懒人路线 — 在仓库根目录跑 `claude`,然后丢这些话:
+
+| 你想干什么 | 一句话指令 |
+|---|---|
+| **第一次配环境** | `「帮我把 t2v_promptgen 跑起来。先装依赖、再起服务,验证 http://localhost:8765 返回 200。如果缺包就装上。」` |
+| **重装依赖** | `「按 requirements.txt 重装一遍所有依赖,把 cache 也清一下」` |
+| **起服务** | `「起一下 web 服务,后台跑,端口 8765,起完发个 curl 检查」` |
+| **停服务** | `「停掉 8765 端口的服务」` |
+| **跑全部测试** | `「跑一下 tests/ 下面所有测试,看覆盖率」` |
+| **加 API key** | `「在我的 shell 里 export 一个 T2V_DEFAULT_API_KEY=sk-...,然后起服务,首页 API key 字段就预填好」`(预填功能等 PR-2 加;现在临时贴) |
+| **检查服务在不在** | `「查一下 localhost:8765 是不是活的,顺便看最近 20 行日志」` |
+| **拉最新代码 + 重启** | `「git pull 一下,然后重启 web 服务」` |
+| **跑一个 demo 任务** | `「用 deepseek-chat 跑一个 30 条 prompt 的人手测试,sk-...,看下完整通过率和样本」` |
+
+Claude Code 会用 Bash + Read + Edit 工具自己搞定。中间有报错会自己排查重试。
+
+### 命令行(自动化/批量,WIP)
 
 ```bash
 t2v-promptgen create --capability "人手生成能力"   # 新建任务
