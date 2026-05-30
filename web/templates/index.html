@@ -4,8 +4,45 @@
 {% block content %}
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
 
-  <!-- Create new run -->
-  <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+  <!-- Two-tab selector for task source -->
+  <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-6"
+       x-data="{ tab: 'generate' }">
+
+    <!-- Tab bar -->
+    <div class="flex gap-2 mb-5 border-b border-slate-200">
+      <button @click="tab = 'generate'" type="button"
+              :class="tab === 'generate' ? 'border-orange-500 text-orange-700' : 'border-transparent text-slate-500 hover:text-slate-900'"
+              class="px-4 py-2 text-sm font-medium border-b-2 transition">
+        🪄 从零生成
+      </button>
+      <button @click="tab = 'rewrite'" type="button"
+              :class="tab === 'rewrite' ? 'border-orange-500 text-orange-700' : 'border-transparent text-slate-500 hover:text-slate-900'"
+              class="px-4 py-2 text-sm font-medium border-b-2 transition">
+        📋 改写已有 prompt
+      </button>
+    </div>
+
+    <!-- Rewrite tab: link out to dedicated upload page -->
+    <div x-show="tab === 'rewrite'" x-cloak>
+      <h2 class="text-xl font-bold text-slate-900 mb-1">从已有 prompt 改写</h2>
+      <p class="text-sm text-slate-500 mb-5">
+        上传 JSON / JSONL / TXT / CSV / XLSX 文件 → 字段映射 → 改写指令 → 质检审核 → 导出。
+        适合"已有 prompt 库 + 想做增量扩充"或"批量做主体替换 / 难度提升 / 风格切换"。
+      </p>
+      <a href="/rewrite/upload" class="inline-block bg-orange-500 hover:bg-orange-600 text-white font-medium px-6 py-2.5 rounded-lg shadow-sm">
+        📁 选择文件 →
+      </a>
+      <div class="mt-4 text-xs text-slate-500">
+        <ul class="space-y-1">
+          <li>• 支持 5 种格式,自动检测编码(UTF-8 / GBK / UTF-16)</li>
+          <li>• 最大 10 MB,5000 行</li>
+          <li>• AI 自动猜字段映射(prompt 在哪列、id 在哪列),可以改</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Generate tab: the existing form -->
+    <div x-show="tab === 'generate'">
     <h2 class="text-xl font-bold text-slate-900 mb-1">新建评测任务</h2>
     <p class="text-sm text-slate-500 mb-6">告诉我你想测视频模型的哪个能力,我自动产出测试用例 + 评测员说明书</p>
 
@@ -97,7 +134,9 @@
         </button>
       </div>
     </form>
-  </div>
+    </div>  <!-- end generate tab -->
+
+  </div>  <!-- end tab container -->
 
   <!-- Quick stats / 流程介绍 -->
   <div class="space-y-4">

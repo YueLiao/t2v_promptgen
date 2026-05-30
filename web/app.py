@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -497,6 +497,209 @@ async def add_custom_tag(run_id: str, dim: str = Form(...), name_zh: str = Form(
         "all_selected": run.recommended_tags.get(dim, []),
         "all_customs": run.custom_tags.get(dim, []),
     })
+
+
+# ===========================================================================
+# Rewrite feature — R0 upload, R1 field mapping (PR-1)
+# ===========================================================================
+# Stores parsed raw rows alongside the run so R1 can populate after mapping.
+RUN_RAW_ROWS: dict[str, list[dict]] = {}
+
+
+@app.get("/rewrite/upload", response_class=HTMLResponse)
+def rewrite_upload_page(request: Request):
+    """R0: dedicated upload page (linked from index tab)."""
+    return templates.TemplateResponse(request, "rewrite_upload.html", {})
+
+
+@app.post("/rewrite/upload")
+def rewrite_upload(
+    file: UploadFile = File(...),
+    sheet_name: str = Form(""),
+    provider: str = Form("deepseek"),
+    model_p1: str = Form("deepseek-chat"),
+    model_p2: str = Form("deepseek-chat"),
+    api_key: str = Form(""),
+    base_url: str = Form(""),
+):
+    """R0: parse uploaded prompt list, create a run, redirect to R1."""
+    from ..parsers.prompt_loader import load_prompts
+    from ..core.rewrite_schema import ParseError
+
+    raw = file.file.read()
+    try:
+        source_file, rows = load_prompts(
+            raw, file.filename or "uploaded",
+            sheet_name=sheet_name or None,
+        )
+    except ParseError as exc:
+        # Return a JSON error so the upload form can show it inline
+        return JSONResponse(
+            {"ok": False, "code": exc.code, "message": str(exc),
+             "location": exc.location},
+            status_code=413 if exc.code in ("SIZE_EXCEEDED", "ROW_EXCEEDED") else 400,
+        )
+
+    # Build a new rewrite run
+    run_id = str(uuid.uuid4())[:8]
+    now = datetime.now()
+    run = Run(
+        id=run_id,
+        capability_slug="custom_rewrite",
+        created_at=now, updated_at=now,
+        phase=Phase.P1_DIMENSIONS,        # R1 maps onto P1 slot internally
+        user_description=f"[改写任务] {source_file.filename} ({source_file.row_count} 条)",
+        provider=provider,
+        model=f"{model_p1} / {model_p2}",
+        source="rewrite",
+        source_file=source_file,
+    )
+    RUNS[run_id] = run
+    RUN_RAW_ROWS[run_id] = rows
+
+    if api_key:
+        RUN_CREDS[run_id] = {
+            "provider": provider,
+            "model": model_p1,
+            "model_p1": model_p1,
+            "model_p2": model_p2,
+            "api_key": api_key,
+            "base_url": base_url or None,
+        }
+
+    return RedirectResponse(f"/rewrite/{run_id}/map", status_code=303)
+
+
+@app.get("/rewrite/{run_id}/map", response_class=HTMLResponse)
+def rewrite_map_page(request: Request, run_id: str):
+    """R1: field-mapping page. Auto-runs LLM/heuristic guess if mapping empty."""
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+
+    raw_rows = RUN_RAW_ROWS.get(run_id, [])
+    columns = list(raw_rows[0].keys()) if raw_rows else []
+
+    # If mapping not set yet, try guess (LLM if creds available, else heuristic)
+    suggestion_text = ""
+    if not run.field_mapping:
+        from ..parsers.field_mapper import llm_guess
+        creds = RUN_CREDS.get(run_id)
+        client = None
+        if creds and creds.get("api_key"):
+            try:
+                client = llm_phases.build_client(
+                    provider=creds["provider"],
+                    model=creds.get("model_p2") or creds["model"],
+                    api_key=creds["api_key"],
+                    base_url=creds.get("base_url") or None,
+                )
+            except Exception:
+                client = None
+        m, suggestion_text = llm_guess(columns, raw_rows[:5], client=client)
+        # Store the guess as suggestion (not yet committed)
+        run.field_mapping = {
+            k: v for k, v in [
+                ("prompt_zh", m.prompt_zh),
+                ("prompt_en", m.prompt_en),
+                ("source_id", m.source_id),
+            ] if v
+        }
+
+    return templates.TemplateResponse(request, "rewrite_map.html", {
+        "run": run,
+        "columns": columns,
+        "sample_rows": raw_rows[:5],
+        "current_mapping": run.field_mapping,
+        "suggestion_text": suggestion_text,
+        "phase_order": PHASE_ORDER,
+        "phase_label": PHASE_LABEL_ZH,
+    })
+
+
+@app.post("/rewrite/{run_id}/map")
+def rewrite_map_confirm(
+    run_id: str,
+    prompt_zh: str = Form(""),
+    prompt_en: str = Form(""),
+    source_id: str = Form(""),
+):
+    """R1 confirm: validate user's column mapping, fill SourcePrompt list."""
+    from ..core.rewrite_schema import FieldMapping, SourcePrompt, ParseError
+
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+
+    # Build mapping (Pydantic validator requires ≥1 prompt column)
+    try:
+        mapping = FieldMapping(
+            prompt_zh=prompt_zh.strip() or None,
+            prompt_en=prompt_en.strip() or None,
+            source_id=source_id.strip() or None,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "code": "MAPPING_INVALID", "message": str(exc)},
+            status_code=400,
+        )
+
+    raw_rows = RUN_RAW_ROWS.get(run_id, [])
+    columns = list(raw_rows[0].keys()) if raw_rows else []
+
+    # Verify mapped column names exist in the file
+    for key, val in [("prompt_zh", mapping.prompt_zh),
+                     ("prompt_en", mapping.prompt_en),
+                     ("source_id", mapping.source_id)]:
+        if val and val not in columns:
+            return JSONResponse(
+                {"ok": False, "code": "MAPPING_COLUMN_NOT_FOUND",
+                 "message": f"列 {val!r} 不存在,请从下拉中选"},
+                status_code=400,
+            )
+
+    # Build normalized SourcePrompt records
+    source_prompts: list[SourcePrompt] = []
+    for idx, row in enumerate(raw_rows):
+        sid = str(row.get(mapping.source_id, idx + 1)) if mapping.source_id else str(idx + 1)
+        zh = str(row.get(mapping.prompt_zh) or "").strip() if mapping.prompt_zh else ""
+        en = str(row.get(mapping.prompt_en) or "").strip() if mapping.prompt_en else ""
+
+        # Metadata = everything else
+        meta = {k: v for k, v in row.items()
+                if k not in (mapping.prompt_zh, mapping.prompt_en, mapping.source_id)}
+
+        text_for_source = zh or en   # at least one is required per validator
+        if not text_for_source:
+            # Row had empty content under both mapped columns; mark failed
+            sp = SourcePrompt(
+                source_id=sid, original_text="(empty)",
+                metadata=meta, selected=False,
+                failed_to_rewrite=True,
+                fail_reason="empty after mapping",
+            )
+        else:
+            sp = SourcePrompt(
+                source_id=sid,
+                original_text=zh or en,
+                original_text_en=en or None,
+                metadata=meta,
+            )
+        source_prompts.append(sp)
+
+    # Commit
+    run.source_prompts = source_prompts
+    run.field_mapping = {
+        k: v for k, v in [
+            ("prompt_zh", mapping.prompt_zh),
+            ("prompt_en", mapping.prompt_en),
+            ("source_id", mapping.source_id),
+        ] if v
+    }
+    run.updated_at = datetime.now()
+    # PR-2 will continue to R2 directive page — for now redirect back to map
+    # which will show updated state. (R2 page = TODO PR-2)
+    return RedirectResponse(f"/rewrite/{run_id}/map", status_code=303)
 
 
 @app.post("/runs/{run_id}/slug")

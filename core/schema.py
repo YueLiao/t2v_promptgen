@@ -19,6 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .rewrite_schema import SourceFile, SourcePrompt, RewriteDirective  # noqa: F401
+
 SCHEMA_VERSION = 1
 
 
@@ -144,6 +146,28 @@ class PromptEntry(BaseModel):
     generated_at: datetime
     generation_round: int = 1                # incremented on regen
 
+    # ---- Rewrite-feature fields (None for generate-source runs) ----
+    source_id: str | None = Field(
+        default=None,
+        description="Link to SourcePrompt.source_id when this came from rewrite",
+    )
+    rewrite_diff: str | None = Field(
+        default=None,
+        description="LLM-authored one-liner describing what changed",
+    )
+    rewrite_kept_score: int | None = Field(
+        default=None, ge=0, le=10,
+        description="How well original meaning was preserved (0-10); threshold 5",
+    )
+    rewrite_adherence_score: int | None = Field(
+        default=None, ge=0, le=10,
+        description="How well the LLM followed the directive (0-10); threshold 7",
+    )
+    rewrite_accepted: bool | None = Field(
+        default=None,
+        description="R5 reviewer decision; None = not reviewed yet",
+    )
+
     # ---- QA results (populated by P3; None/empty before P3 ran) ----
     qa_rule_errors: list[str] = Field(
         default_factory=list,
@@ -239,6 +263,18 @@ class Run(BaseModel):
     model: str = "claude-opus-4-7"
     cost_usd_used: float = 0.0
     cost_usd_limit: float = 5.0
+
+    # ---- Rewrite-feature fields (default to None / empty for generate runs) ----
+    source: Literal["generate", "rewrite"] = Field(
+        default="generate",
+        description="Task type: 'generate' = from-scratch, 'rewrite' = rewrite uploaded list",
+    )
+    source_file: SourceFile | None = None
+    source_prompts: list[SourcePrompt] = Field(default_factory=list)
+    field_mapping: dict[str, str] = Field(default_factory=dict)
+    rewrite_directive: RewriteDirective | None = None
+    rewrite_round: int = Field(default=0, ge=0)
+    rewrite_max_rounds: int = Field(default=3, ge=1, le=10)
 
 
 # ---------------------------------------------------------------------------

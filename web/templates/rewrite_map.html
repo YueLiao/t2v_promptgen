@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}字段映射 | {{ run.id }}{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-4">
+
+  <!-- File info card -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+      <div>
+        <h2 class="text-lg font-bold text-slate-900">字段映射</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          文件 <code class="bg-slate-100 px-1 rounded">{{ run.source_file.filename }}</code>
+          · 格式 <code class="bg-slate-100 px-1 rounded">{{ run.source_file.format }}</code>
+          · 编码 <code class="bg-slate-100 px-1 rounded">{{ run.source_file.encoding }}</code>
+          · {{ run.source_file.row_count }} 行 / {{ "%.1f"|format(run.source_file.size_bytes / 1024) }} KB
+          {% if run.source_file.sheet_name %}· sheet <code class="bg-slate-100 px-1 rounded">{{ run.source_file.sheet_name }}</code>{% endif %}
+        </p>
+      </div>
+      <a href="/" class="text-xs text-slate-500 hover:text-slate-900">← 重新上传</a>
+    </div>
+  </div>
+
+  <!-- Preview table -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-200">
+      <h3 class="text-sm font-semibold text-slate-700">前 {{ sample_rows|length }} 行预览</h3>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-50">
+          <tr>
+            {% for col in columns %}
+            <th class="px-3 py-2 text-left font-medium text-slate-600 border-b">{{ col }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          {% for row in sample_rows %}
+          <tr>
+            {% for col in columns %}
+            <td class="px-3 py-2 text-slate-700 max-w-xs truncate" title="{{ row.get(col, '') }}">{{ row.get(col, '') }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Mapping form -->
+  <form method="POST" action="/rewrite/{{ run.id }}/map" class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-4">
+    <div>
+      <h3 class="text-sm font-semibold text-slate-900">挑出 prompt 在哪一列</h3>
+      <p class="text-xs text-slate-500 mt-0.5">
+        {% if suggestion_text %}AI 已猜:<span class="text-slate-700">{{ suggestion_text }}</span>{% endif %}
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div>
+        <label class="block text-xs font-medium text-slate-700 mb-1">
+          中文 prompt 列 <span class="text-slate-400">(prompt_zh)</span>
+        </label>
+        <select name="prompt_zh" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">— 不映射 —</option>
+          {% for col in columns %}
+          <option value="{{ col }}" {% if current_mapping.get('prompt_zh') == col %}selected{% endif %}>{{ col }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-700 mb-1">
+          英文 prompt 列 <span class="text-slate-400">(prompt_en)</span>
+        </label>
+        <select name="prompt_en" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">— 不映射 —</option>
+          {% for col in columns %}
+          <option value="{{ col }}" {% if current_mapping.get('prompt_en') == col %}selected{% endif %}>{{ col }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-700 mb-1">
+          原始 ID 列 <span class="text-slate-400">(可选)</span>
+        </label>
+        <select name="source_id" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">— 用行号 —</option>
+          {% for col in columns %}
+          <option value="{{ col }}" {% if current_mapping.get('source_id') == col %}selected{% endif %}>{{ col }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <p class="text-xs text-slate-500">
+      其余列会自动归入 metadata,改写时可参考。
+      <b>中文 / 英文 prompt 至少要选一个</b>。
+    </p>
+
+    <div class="flex justify-between pt-2">
+      <a href="/" class="text-sm text-slate-500 hover:text-slate-900 px-4 py-2">← 上一步</a>
+      <button type="submit" class="bg-orange-500 hover:bg-orange-600 text-white font-medium px-6 py-2 rounded-lg">
+        下一步:写改写指令 →
+      </button>
+    </div>
+  </form>
+
+  {% if run.source_prompts %}
+  <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-800">
+    ✓ 已映射 {{ run.source_prompts|length }} 条 prompt。PR-2 上线后这里会跳到"改写指令"页;目前只走到这一步。
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
