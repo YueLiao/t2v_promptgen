@@ -11,7 +11,8 @@
 
   <h2 class="text-xl font-bold text-slate-900 mb-2">
     <span x-show="status === 'running'">正在批量改写…</span>
-    <span x-show="status === 'completed'" x-cloak>改写完成 ✓</span>
+    <span x-show="status === 'qa_running'" x-cloak>改写完成,正在跑保持率 + 遵循度 judge…</span>
+    <span x-show="status === 'completed'" x-cloak>全部完成 ✓</span>
     <span x-show="status === 'cancelled'" x-cloak>已取消</span>
     <span x-show="status === 'failed'" x-cloak>改写失败</span>
   </h2>
@@ -68,7 +69,7 @@ function rewriteProgress() {
           this.done = data.done || 0;
           this.total = data.total || this.total;
           this.result = data.result || null;
-          if (this.status !== 'running') {
+          if (this.status !== 'running' && this.status !== 'qa_running') {
             // Brief pause then auto-redirect to review
             if (this.status === 'completed') {
               setTimeout(() => window.location.href = '/runs/{{ run.id }}', 1200);

@@ -355,6 +355,12 @@ async def view_run(request: Request, run_id: str):
         from .mock_data import compute_coverage_matrix
         extra["coverage"] = compute_coverage_matrix(run.prompts, run.sl2_list, run.axes)
         extra["qa_report"] = RUN_QA_REPORTS.get(run_id, {})
+        # For rewrite runs, build {prompt_id: SourcePrompt} for diff view
+        if run.source == "rewrite":
+            sp_by_id = {sp.source_id: sp for sp in run.source_prompts}
+            extra["source_by_pid"] = {
+                p.id: sp_by_id.get(p.source_id) for p in run.prompts
+            }
 
     if RUN_LAST_ERROR.get(run_id):
         extra["last_error"] = RUN_LAST_ERROR[run_id]
@@ -848,6 +854,21 @@ def _run_rewrite_background(run_id: str, client):
 
     try:
         result = rewrite_run(run, client, progress_cb=_progress, cancel_flag=_cancelled)
+
+        # Don't flip status to "completed" yet — R4 quality judges still to run
+        if not result.cancelled and result.succeeded > 0:
+            RUN_REWRITE_STATE[run_id] = {
+                "status": "qa_running",
+                "done": _progress_done(run_id),
+                "total": RUN_REWRITE_STATE.get(run_id, {}).get("total", 0),
+                "result": None,
+            }
+            try:
+                _run_r4_quality(run_id, run, client)
+            except Exception as q_exc:
+                print(f"[R4 failed but continuing] run={run_id}: {q_exc}", flush=True)
+            run.phase = Phase.P4_REVIEW
+
         RUN_REWRITE_STATE[run_id] = {
             "status": "cancelled" if result.cancelled else "completed",
             "done": _progress_done(run_id),
@@ -860,9 +881,6 @@ def _run_rewrite_background(run_id: str, client):
                 "error_breakdown": result.error_breakdown,
             },
         }
-        # On success, advance phase to P4 review (rewrite uses same review)
-        if not result.cancelled and result.succeeded > 0:
-            run.phase = Phase.P4_REVIEW
         run.updated_at = datetime.now()
     except Exception as exc:
         RUN_REWRITE_STATE[run_id] = {
@@ -878,6 +896,93 @@ def _progress_done(run_id: str) -> int:
     return RUN_REWRITE_STATE.get(run_id, {}).get("done", 0)
 
 
+def _run_r4_quality(run_id: str, run, client) -> None:
+    """R4: keep score + adherence judges + (optional) existing P3 rules check.
+
+    Mutates run.prompts in place. Stores summary in RUN_QA_REPORTS so the
+    review page can show it (reusing the existing QA panel + adding rewrite-
+    specific fields).
+    """
+    import time
+    from ..qa.rewrite_quality import (
+        measure_keep_scores, measure_adherence_scores, attach_scores_to_entries,
+    )
+    from ..qa.rules import check_one
+
+    # Build (SourcePrompt, PromptEntry) pairs by source_id
+    sp_by_id = {sp.source_id: sp for sp in run.source_prompts}
+    pairs: list[tuple] = []
+    for pe in run.prompts:
+        sid = pe.source_id
+        if sid and sid in sp_by_id:
+            pairs.append((sp_by_id[sid], pe))
+
+    if not pairs:
+        return
+
+    # Rules pass (lightweight, no LLM). For rewrite entries:
+    # - sl2_covered / axes_values checks: N/A (rewrite is capability-free)
+    # - English-only length checks: skip if prompt_en is empty (zh-only OK)
+    REWRITE_IRRELEVANT_PREFIXES = (
+        "sl2_covered is empty",
+        "axes_values is empty",
+    )
+    rule_fails = 0
+    for _, pe in pairs:
+        all_errs = check_one(pe)
+        relevant = []
+        for e in all_errs:
+            if e in REWRITE_IRRELEVANT_PREFIXES:
+                continue
+            # If en is empty, skip en-length errors (rewrite may be zh-only)
+            if not pe.prompt_en and "prompt_en" in e:
+                continue
+            relevant.append(e)
+        pe.qa_rule_errors = relevant
+        if relevant:
+            rule_fails += 1
+
+    # Keep + adherence judges (LLM)
+    t0 = time.time()
+    keep = measure_keep_scores(pairs, client)
+    print(f"[LLM-timing] keep done in {time.time()-t0:.1f}s  run_id={run_id}", flush=True)
+
+    t0 = time.time()
+    adh = measure_adherence_scores(pairs, run.rewrite_directive, client)
+    print(f"[LLM-timing] adherence done in {time.time()-t0:.1f}s  run_id={run_id}", flush=True)
+
+    summary = attach_scores_to_entries(pairs, keep, adh)
+
+    # Set qa_passed flag and needs_human_review based on aggregate
+    KEEP_TH, ADH_TH = 5, 7
+    for _, pe in pairs:
+        k_ok = pe.rewrite_kept_score is None or pe.rewrite_kept_score >= KEEP_TH
+        a_ok = pe.rewrite_adherence_score is None or pe.rewrite_adherence_score >= ADH_TH
+        rule_ok = not pe.qa_rule_errors
+        pe.qa_passed = bool(rule_ok and k_ok and a_ok)
+        pe.needs_human_review = not pe.qa_passed
+
+    RUN_QA_REPORTS[run_id] = {
+        "total": summary["total"],
+        "passed": summary["both_pass"],
+        "pass_rate": (summary["both_pass"] / summary["total"]) if summary["total"] else 0,
+        "fail_rules": rule_fails,
+        "fail_naturalness": 0,            # not applicable for rewrite (judges focus on intent)
+        "fail_coverage": summary["total"] - summary["both_pass"],
+        "naturalness_zh_avg": 0,
+        "naturalness_en_avg": 0,
+        "stress_ratio": sum(1 for _, pe in pairs if pe.is_stress) / summary["total"]
+                          if summary["total"] else 0,
+        "sl2_uncovered": [],
+        "judges_ran": True,
+        # Rewrite-specific fields (review.html new branch will read these):
+        "keep_avg": summary["keep_avg"],
+        "adherence_avg": summary["adherence_avg"],
+        "keep_pass": summary["keep_pass"],
+        "adherence_pass": summary["adherence_pass"],
+    }
+
+
 @app.post("/rewrite/{run_id}/cancel")
 def rewrite_cancel(run_id: str):
     """R3 cancel: signal background task to stop after current batch."""
@@ -888,6 +993,150 @@ def rewrite_cancel(run_id: str):
         )
     RUN_REWRITE_CANCEL[run_id] = True
     return JSONResponse({"ok": True, "message": "已发取消信号,等待当前批次完成"})
+
+
+@app.post("/rewrite/{run_id}/accept/{prompt_id}")
+def rewrite_accept(run_id: str, prompt_id: str, decision: str = Form("accept")):
+    """Set rewrite_accepted on a single PromptEntry. Returns JSON for AJAX."""
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+    target = next((p for p in run.prompts if p.id == prompt_id), None)
+    if target is None:
+        return JSONResponse(
+            {"ok": False, "code": "PROMPT_NOT_FOUND", "message": f"id={prompt_id} 不存在"},
+            status_code=404,
+        )
+    if decision == "accept":
+        target.rewrite_accepted = True
+    elif decision == "reject":
+        target.rewrite_accepted = False
+    elif decision == "unset":
+        target.rewrite_accepted = None
+    else:
+        return JSONResponse(
+            {"ok": False, "code": "BAD_DECISION", "message": "decision 必须是 accept/reject/unset"},
+            status_code=400,
+        )
+    run.updated_at = datetime.now()
+    return JSONResponse({"ok": True, "id": prompt_id, "decision": decision})
+
+
+@app.post("/rewrite/{run_id}/iterate")
+async def rewrite_iterate(run_id: str, request: Request, background_tasks: BackgroundTasks):
+    """R5 iteration: redo the rejected subset with appended refinement."""
+    from ..phases.rewrite import iterate_rewrite as iterate_fn
+
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+
+    body = await request.json()
+    rejected = body.get("rejected_ids") or []
+    refinement = (body.get("refinement") or "").strip()
+
+    if not rejected:
+        # No-op: nothing to iterate
+        return JSONResponse({"ok": False, "code": "NO_REJECTED",
+                              "message": "没有被拒绝的条目可改"}, status_code=400)
+    if run.rewrite_round >= run.rewrite_max_rounds:
+        return JSONResponse({"ok": False, "code": "MAX_ROUNDS_REACHED",
+                              "message": f"已用完 {run.rewrite_max_rounds} 轮迭代"},
+                             status_code=400)
+
+    creds = RUN_CREDS.get(run_id)
+    if not creds or not creds.get("api_key"):
+        return JSONResponse({"ok": False, "code": "NO_API_KEY",
+                              "message": "改写需要 API key"}, status_code=400)
+    client = llm_phases.build_client(
+        provider=creds["provider"],
+        model=creds.get("model_p2") or creds["model"],
+        api_key=creds["api_key"],
+        base_url=creds.get("base_url") or None,
+    )
+
+    # Mark state as running again so UI polls show progress
+    RUN_REWRITE_STATE[run_id] = {
+        "status": "running",
+        "done": 0,
+        "total": len(rejected),
+        "started_at": datetime.now().isoformat(),
+        "result": None,
+    }
+    RUN_REWRITE_CANCEL[run_id] = False
+    run.phase = Phase.P3_QA
+    run.updated_at = datetime.now()
+
+    background_tasks.add_task(_run_iterate_background, run_id, rejected, refinement, client)
+    return JSONResponse({"ok": True, "round": run.rewrite_round + 1})
+
+
+def _run_iterate_background(run_id: str, rejected_ids: list[str], refinement: str, client):
+    """Background: iterate_rewrite + re-run R4 on the affected subset."""
+    from ..phases.rewrite import iterate_rewrite as iterate_fn
+    run = RUNS.get(run_id)
+    if not run:
+        return
+
+    try:
+        result = iterate_fn(run, rejected_ids, refinement, client)
+        # Re-run R4 quality scores on the whole set (cheap enough)
+        try:
+            _run_r4_quality(run_id, run, client)
+        except Exception:
+            pass
+        RUN_REWRITE_STATE[run_id] = {
+            "status": "completed",
+            "done": len(rejected_ids),
+            "total": len(rejected_ids),
+            "result": {
+                "succeeded": result.succeeded,
+                "failed": result.failed,
+                "elapsed_seconds": round(result.elapsed_seconds, 1),
+                "round": run.rewrite_round,
+            },
+        }
+        run.phase = Phase.P4_REVIEW
+        run.updated_at = datetime.now()
+    except Exception as exc:
+        RUN_REWRITE_STATE[run_id] = {
+            "status": "failed",
+            "done": 0, "total": len(rejected_ids),
+            "result": {"error": f"{type(exc).__name__}: {exc}"},
+        }
+        print(f"[iterate-failed] run={run_id}: {exc}", flush=True)
+
+
+@app.post("/rewrite/{run_id}/confirm")
+def rewrite_confirm(run_id: str):
+    """R5 confirm: advance to R6 (export). Unreviewed entries default to accepted."""
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+
+    total = len(run.prompts)
+    if total == 0:
+        return JSONResponse({"ok": False, "code": "EMPTY",
+                              "message": "没有改写产物可确认"}, status_code=400)
+    reviewed = sum(1 for p in run.prompts if p.rewrite_accepted is not None)
+    review_rate = reviewed / total if total else 0
+    if review_rate < 0.8:
+        return JSONResponse({
+            "ok": False, "code": "INSUFFICIENT_REVIEW",
+            "message": f"已审核 {reviewed}/{total} (<80%),先全部走完",
+        }, status_code=400)
+
+    # Default unreviewed → accepted
+    for p in run.prompts:
+        if p.rewrite_accepted is None:
+            p.rewrite_accepted = True
+
+    # Drop rejected entries from the final set
+    run.prompts = [p for p in run.prompts if p.rewrite_accepted]
+
+    run.phase = Phase.P5_EXPORT
+    run.updated_at = datetime.now()
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
 @app.get("/rewrite/{run_id}/progress")

@@ -2,7 +2,246 @@
 {% block title %}审核确认 ｜ {{ run.id }}{% endblock %}
 
 {% block content %}
-<div class="space-y-6">
+<div class="space-y-6"
+     {% if run.source == 'rewrite' %}x-data="rewriteReview()"{% endif %}>
+
+  {# ============= REWRITE MODE — diff view + accept/reject =============== #}
+  {% if run.source == 'rewrite' %}
+
+  <!-- Rewrite QA summary card -->
+  {% if qa_report and qa_report.get("total") %}
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200">
+    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+      <div>
+        <h2 class="text-lg font-bold text-slate-900">改写质检</h2>
+        <p class="text-xs text-slate-500">保持率(原意有没有丢)+ 指令遵循度(LLM 有没有按你说的改)</p>
+      </div>
+      <form method="POST" action="/runs/{{ run.id }}/p4/rerun_qa" class="inline">
+        <button type="submit" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg">↻ 重跑质检</button>
+      </form>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-0 divide-x divide-slate-100">
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">总产物</div>
+        <div class="text-2xl font-bold text-slate-900 mt-0.5">{{ qa_report.total }}</div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">两关都过</div>
+        <div class="text-2xl font-bold mt-0.5
+          {% if qa_report.pass_rate >= 0.8 %}text-green-600
+          {% elif qa_report.pass_rate >= 0.5 %}text-orange-500
+          {% else %}text-red-600{% endif %}">
+          {{ qa_report.passed }}/{{ qa_report.total }}
+          <span class="text-sm">({{ "%.0f"|format(qa_report.pass_rate * 100) }}%)</span>
+        </div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">保持率均(≥5 算过)</div>
+        <div class="text-2xl font-bold text-slate-800 mt-0.5">
+          {% if qa_report.keep_avg is not none %}{{ qa_report.keep_avg }}{% else %}—{% endif %}
+        </div>
+        <div class="text-xs text-slate-400 mt-0.5">{{ qa_report.keep_pass or 0 }} 条 ≥ 5</div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">遵循度均(≥7 算过)</div>
+        <div class="text-2xl font-bold text-slate-800 mt-0.5">
+          {% if qa_report.adherence_avg is not none %}{{ qa_report.adherence_avg }}{% else %}—{% endif %}
+        </div>
+        <div class="text-xs text-slate-400 mt-0.5">{{ qa_report.adherence_pass or 0 }} 条 ≥ 7</div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="text-xs text-slate-500">规则不过</div>
+        <div class="text-2xl font-bold text-slate-800 mt-0.5">{{ qa_report.fail_rules or 0 }}</div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Bulk actions + iteration -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+    <div class="flex items-center justify-between gap-3 flex-wrap">
+      <div class="flex items-center gap-2">
+        <button @click="acceptAll()" type="button"
+                class="text-xs bg-green-100 hover:bg-green-200 text-green-800 px-3 py-1.5 rounded-lg">✓ 全部接受</button>
+        <button @click="rejectAll()" type="button"
+                class="text-xs bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1.5 rounded-lg">✗ 全部拒绝</button>
+        <span class="text-xs text-slate-500 ml-2">
+          已接受 <span class="font-medium text-green-700" x-text="acceptedCount"></span> ·
+          已拒绝 <span class="font-medium text-red-700" x-text="rejectedCount"></span> ·
+          未审 <span x-text="unreviewedCount"></span>
+        </span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-slate-500">
+          迭代轮 {{ run.rewrite_round }}/{{ run.rewrite_max_rounds }}
+        </span>
+        <button @click="openIterate = !openIterate" type="button"
+                class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg">
+          ↻ 让 AI 改一遍拒绝的
+        </button>
+        <form method="POST" action="/rewrite/{{ run.id }}/confirm" class="inline">
+          <button type="submit"
+                  class="bg-orange-500 hover:bg-orange-600 text-white text-sm px-4 py-1.5 rounded-lg">
+            ✓ 通过 → 导出
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <div x-show="openIterate" x-cloak class="mt-3 pt-3 border-t border-slate-200">
+      <p class="text-xs text-slate-600 mb-2">把拒绝的全部交给 AI 再改一遍。指令叠加你下面这段补充说明:</p>
+      <textarea x-model="iterateRefinement" rows="3" placeholder="例:再加多一些感官细节;主体改成不要那么夸张"
+                class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"></textarea>
+      <div class="flex justify-end gap-2 mt-2">
+        <button @click="openIterate = false" type="button"
+                class="text-xs text-slate-500 px-3 py-1.5">取消</button>
+        <button @click="startIterate()" :disabled="rejectedCount === 0 || iterating" type="button"
+                class="bg-slate-700 hover:bg-slate-800 disabled:bg-slate-300 text-white text-xs px-4 py-1.5 rounded">
+          <span x-show="!iterating">▶ 改 <span x-text="rejectedCount"></span> 条</span>
+          <span x-show="iterating">提交中...</span>
+        </button>
+      </div>
+      <p x-show="iterateError" x-cloak class="text-xs text-red-700 mt-2" x-text="iterateError"></p>
+    </div>
+  </div>
+
+  <!-- Diff view: original | rewritten -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+      <h3 class="text-lg font-bold text-slate-900">改写对比({{ run.prompts|length }} 条)</h3>
+      <div class="text-xs text-slate-500">★ 单条接受/拒绝/编辑</div>
+    </div>
+
+    <div class="divide-y divide-slate-100">
+      {% for p in run.prompts %}
+      {% set sp = source_by_pid.get(p.id) %}
+      <div class="p-4 hover:bg-slate-50"
+           :class="decisions['{{ p.id }}'] === false ? 'bg-red-50/40' : (decisions['{{ p.id }}'] === true ? 'bg-green-50/40' : '')">
+        <div class="flex items-start justify-between gap-3 mb-2">
+          <div class="flex items-center gap-2 text-xs">
+            <code class="bg-slate-100 px-1.5 py-0.5 rounded">{{ p.id }}</code>
+            {% if p.rewrite_kept_score is not none %}
+            <span class="px-2 py-0.5 rounded font-medium
+              {% if p.rewrite_kept_score >= 5 %}bg-green-100 text-green-800{% else %}bg-red-100 text-red-800{% endif %}">
+              keep {{ p.rewrite_kept_score }}/10
+            </span>
+            {% endif %}
+            {% if p.rewrite_adherence_score is not none %}
+            <span class="px-2 py-0.5 rounded font-medium
+              {% if p.rewrite_adherence_score >= 7 %}bg-green-100 text-green-800
+              {% elif p.rewrite_adherence_score >= 5 %}bg-amber-100 text-amber-800
+              {% else %}bg-red-100 text-red-800{% endif %}">
+              adh {{ p.rewrite_adherence_score }}/10
+            </span>
+            {% endif %}
+            {% if p.qa_rule_errors %}
+            <span class="px-2 py-0.5 rounded bg-red-100 text-red-700">规则错</span>
+            {% endif %}
+          </div>
+          <div class="flex items-center gap-1">
+            <button @click="decide('{{ p.id }}', 'accept')" type="button"
+                    class="text-xs px-2 py-1 rounded"
+                    :class="decisions['{{ p.id }}'] === true ? 'bg-green-600 text-white' : 'bg-slate-100 hover:bg-green-100 text-slate-700'">
+              ✓
+            </button>
+            <button @click="decide('{{ p.id }}', 'reject')" type="button"
+                    class="text-xs px-2 py-1 rounded"
+                    :class="decisions['{{ p.id }}'] === false ? 'bg-red-600 text-white' : 'bg-slate-100 hover:bg-red-100 text-slate-700'">
+              ✗
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+          <div class="bg-slate-50 rounded p-3">
+            <div class="text-xs text-slate-500 mb-1">原 prompt</div>
+            <div class="text-slate-700">{{ sp.original_text if sp else '(无源数据)' }}</div>
+            {% if sp and sp.original_text_en %}
+            <div class="text-xs text-slate-500 mt-1 italic">{{ sp.original_text_en }}</div>
+            {% endif %}
+          </div>
+          <div class="bg-white rounded p-3 border border-slate-200">
+            <div class="text-xs text-slate-500 mb-1">改写后</div>
+            <div class="text-slate-900">{{ p.prompt_zh }}</div>
+            {% if p.prompt_en %}
+            <div class="text-xs text-slate-500 mt-1 italic">{{ p.prompt_en }}</div>
+            {% endif %}
+            {% if p.rewrite_diff %}
+            <div class="text-xs text-orange-700 mt-2 pt-2 border-t border-slate-100">
+              💡 {{ p.rewrite_diff }}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+
+        {% if p.qa_rule_errors %}
+        <div class="text-xs text-red-700 mt-2">规则:{{ p.qa_rule_errors|join("; ") }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+<script>
+function rewriteReview() {
+  const initial = {};
+  {% for p in run.prompts %}
+  initial['{{ p.id }}'] = {% if p.rewrite_accepted is true %}true{% elif p.rewrite_accepted is false %}false{% else %}null{% endif %};
+  {% endfor %}
+  return {
+    decisions: initial,
+    openIterate: false,
+    iterateRefinement: '',
+    iterating: false,
+    iterateError: '',
+    get acceptedCount() { return Object.values(this.decisions).filter(v => v === true).length; },
+    get rejectedCount() { return Object.values(this.decisions).filter(v => v === false).length; },
+    get unreviewedCount() { return Object.values(this.decisions).filter(v => v === null).length; },
+    async decide(pid, action) {
+      const form = new FormData();
+      form.append('decision', action);
+      try {
+        const r = await fetch(`/rewrite/{{ run.id }}/accept/${pid}`, {method: 'POST', body: form});
+        if (r.ok) {
+          this.decisions[pid] = action === 'accept' ? true : false;
+        }
+      } catch (e) { console.error(e); }
+    },
+    async acceptAll() {
+      for (const pid of Object.keys(this.decisions)) await this.decide(pid, 'accept');
+    },
+    async rejectAll() {
+      for (const pid of Object.keys(this.decisions)) await this.decide(pid, 'reject');
+    },
+    async startIterate() {
+      this.iterating = true;
+      this.iterateError = '';
+      const rejected = Object.entries(this.decisions).filter(([_, v]) => v === false).map(([k]) => k);
+      // Need source_ids not prompt_ids — they share the rw_ prefix so strip it
+      const source_ids = rejected.map(rid => rid.replace(/^rw_/, ''));
+      try {
+        const r = await fetch('/rewrite/{{ run.id }}/iterate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({rejected_ids: source_ids, refinement: this.iterateRefinement}),
+        });
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+          this.iterateError = (data.message || ('HTTP ' + r.status));
+          return;
+        }
+        // Reload to show generating page with iterate progress
+        window.location.href = '/runs/{{ run.id }}';
+      } catch (e) { this.iterateError = String(e); }
+      finally { this.iterating = false; }
+    },
+  };
+}
+</script>
+
+  {% else %}
+
+  {# ============= GENERATE MODE — original review UI =============== #}
 
   <!-- Back-to-previous-step row -->
   <div class="flex items-center gap-2 text-sm">
@@ -266,4 +505,8 @@
     }
   });
 </script>
+
+  {% endif %}  {# end source == 'rewrite' branch #}
+
+</div>  {# end x-data container #}
 {% endblock %}
