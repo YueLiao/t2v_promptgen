@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}改写指令 | {{ run.id }}{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-4" x-data="directivePanel()">
+
+  <!-- Summary card -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <div>
+        <h2 class="text-lg font-bold text-slate-900">改写指令</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          可改写 <span class="font-medium text-orange-600">{{ eligible_count }}</span> 条
+          {% if failed_count %}· {{ failed_count }} 条因映射失败已跳过{% endif %}
+        </p>
+      </div>
+      <a href="/rewrite/{{ run.id }}/map" class="text-xs text-slate-500 hover:text-slate-900">← 返回字段映射</a>
+    </div>
+  </div>
+
+  <!-- Card groups -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200">
+    <div class="px-5 py-3 border-b border-slate-200">
+      <h3 class="text-sm font-semibold text-slate-900">选预设卡片</h3>
+      <p class="text-xs text-slate-500 mt-0.5">
+        点开任意一组,勾选卡片设参数。卡片之间是叠加关系,按勾选顺序应用。
+        已选 <span class="font-medium" x-text="selectedTransforms.length"></span> 张。
+      </p>
+    </div>
+
+    <div class="divide-y divide-slate-100">
+      {% for group in cards_ui.groups %}
+      <div x-data="{ open: false }" class="px-5 py-2">
+        <button type="button" @click="open = !open"
+                class="w-full flex items-center justify-between py-2 text-left">
+          <div class="flex items-center gap-3">
+            <span class="text-sm font-semibold text-slate-900">{{ group.name }}</span>
+            <span class="text-xs text-slate-500">{{ group.cards|length }} 张</span>
+            <template x-for="cid in groupSelected('{{ group.name }}')" :key="cid">
+              <span class="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded" x-text="cid"></span>
+            </template>
+          </div>
+          <span class="text-xs text-slate-400">
+            <span x-show="!open">展开 ▼</span>
+            <span x-show="open">收起 ▲</span>
+          </span>
+        </button>
+
+        <div x-show="open" x-cloak class="grid grid-cols-1 md:grid-cols-2 gap-3 pb-3 pt-1">
+          {% for card in group.cards %}
+          <div class="border rounded-lg p-3"
+               :class="isSelected('{{ card.id }}') ? 'border-orange-400 bg-orange-50' : 'border-slate-200 bg-white'">
+            <div class="flex items-start justify-between gap-2 mb-2">
+              <label class="flex items-start gap-2 cursor-pointer flex-1">
+                <input type="checkbox" :checked="isSelected('{{ card.id }}')"
+                       @change="toggle('{{ card.id }}', '{{ card.name_zh }}', $event.target.checked)"
+                       class="mt-0.5">
+                <div>
+                  <div class="text-sm font-semibold text-slate-900">{{ card.name_zh }}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">{{ card.description_zh }}</div>
+                </div>
+              </label>
+            </div>
+
+            <div x-show="isSelected('{{ card.id }}')" x-cloak class="space-y-1.5 pl-6">
+              {% for p in card.params %}
+              <div>
+                <label class="text-xs text-slate-600">{{ p.label_zh }}</label>
+                {% if p.type == 'enum' %}
+                <select @change="setParam('{{ card.id }}', '{{ p.key }}', $event.target.value)"
+                        class="block w-full border border-slate-300 rounded px-2 py-1 text-xs mt-0.5">
+                  {% for opt in p.options %}
+                  <option value="{{ opt }}" {% if opt == p.default %}selected{% endif %}>{{ opt }}</option>
+                  {% endfor %}
+                </select>
+                {% else %}
+                <input type="text" :value="getParam('{{ card.id }}', '{{ p.key }}', '{{ p.default }}')"
+                       @input="setParam('{{ card.id }}', '{{ p.key }}', $event.target.value)"
+                       class="block w-full border border-slate-300 rounded px-2 py-1 text-xs mt-0.5">
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Free text -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+    <h3 class="text-sm font-semibold text-slate-900 mb-2">自由意图(可选,和卡片叠加)</h3>
+    <textarea x-model="freeText" rows="3"
+              placeholder="例:加入中国节庆场景 / 把英文改成中英对照 / 让主体更年长 ..."
+              class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"></textarea>
+    <p class="text-xs text-slate-500 mt-1">
+      卡片是结构化约束,自由文本是补充意图。两者会一起喂给 LLM 做改写。
+      <b>卡片和自由文本至少要有一项非空</b>才能开始。
+    </p>
+  </div>
+
+  <!-- Actions -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center justify-between flex-wrap gap-3">
+    <div class="text-xs text-slate-600">
+      预计改写 <span class="font-medium text-orange-600">{{ eligible_count }}</span> 条
+      · 预估费用 <span x-text="costEstimate()"></span>
+      <span x-show="error" x-cloak class="text-red-600 ml-2" x-text="error"></span>
+    </div>
+    <div class="flex items-center gap-2">
+      <a href="/rewrite/{{ run.id }}/map" class="text-sm text-slate-500 hover:text-slate-900 px-3 py-2">← 上一步</a>
+      <button @click="save()" :disabled="!isValid() || saving"
+              class="bg-slate-200 hover:bg-slate-300 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 text-sm px-4 py-2 rounded-lg">
+        <span x-show="!saving">仅保存指令</span>
+        <span x-show="saving">保存中...</span>
+      </button>
+      <button @click="startRewrite()" :disabled="!isValid() || saving || starting"
+              class="bg-orange-500 hover:bg-orange-600 disabled:bg-slate-300 text-white font-medium px-5 py-2 rounded-lg shadow-sm">
+        <span x-show="!starting">▶ 开始改写</span>
+        <span x-show="starting">启动中...</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+function directivePanel() {
+  return {
+    selectedTransforms: [],     // [{id, name_zh, params, order}]
+    freeText: '',
+    saving: false,
+    starting: false,
+    error: '',
+
+    isSelected(cardId) {
+      return this.selectedTransforms.some(t => t.id === cardId);
+    },
+    groupSelected(groupName) {
+      // shown chips when group collapsed — short list of card ids
+      const ids = this.selectedTransforms.map(t => t.id);
+      return ids;     // simple: show all selected ids (cheap)
+    },
+    toggle(cardId, nameZh, checked) {
+      if (checked && !this.isSelected(cardId)) {
+        this.selectedTransforms.push({
+          id: cardId, name_zh: nameZh, params: {},
+          order: this.selectedTransforms.length,
+        });
+      } else if (!checked) {
+        this.selectedTransforms = this.selectedTransforms.filter(t => t.id !== cardId);
+        // re-number order
+        this.selectedTransforms.forEach((t, i) => t.order = i);
+      }
+    },
+    setParam(cardId, key, value) {
+      const t = this.selectedTransforms.find(x => x.id === cardId);
+      if (t) t.params[key] = value;
+    },
+    getParam(cardId, key, fallback) {
+      const t = this.selectedTransforms.find(x => x.id === cardId);
+      return (t && t.params[key]) || fallback;
+    },
+    isValid() {
+      return this.selectedTransforms.length > 0 || this.freeText.trim().length > 0;
+    },
+    costEstimate() {
+      const n = {{ eligible_count }};
+      // very rough: ~1600 tokens/prompt (in+out) at deepseek-chat $0.27 in + $1.10 out per 1M
+      const usd = n * (800 * 0.27 + 600 * 1.10) / 1e6;
+      return '$' + usd.toFixed(3);
+    },
+    async _saveDirective() {
+      this.error = '';
+      const body = {
+        transforms: this.selectedTransforms,
+        free_text: this.freeText,
+        preserve_original: true,
+      };
+      const r = await fetch('/rewrite/{{ run.id }}/directive', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) {
+        this.error = (data.message || ('保存失败 HTTP ' + r.status)).slice(0, 200);
+        return false;
+      }
+      return true;
+    },
+    async save() {
+      this.saving = true;
+      try { await this._saveDirective(); }
+      finally { this.saving = false; }
+    },
+    async startRewrite() {
+      this.starting = true;
+      try {
+        const saved = await this._saveDirective();
+        if (!saved) return;
+        const r = await fetch('/rewrite/{{ run.id }}/start', {method: 'POST'});
+        if (r.redirected) { window.location.href = r.url; return; }
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          this.error = (data.message || ('启动失败 HTTP ' + r.status)).slice(0, 200);
+        }
+      } finally { this.starting = false; }
+    },
+  };
+}
+</script>
+{% endblock %}

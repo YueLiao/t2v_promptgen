@@ -697,9 +697,206 @@ def rewrite_map_confirm(
         ] if v
     }
     run.updated_at = datetime.now()
-    # PR-2 will continue to R2 directive page — for now redirect back to map
-    # which will show updated state. (R2 page = TODO PR-2)
-    return RedirectResponse(f"/rewrite/{run_id}/map", status_code=303)
+    return RedirectResponse(f"/rewrite/{run_id}/directive", status_code=303)
+
+
+# ===========================================================================
+# Rewrite R2 + R3 (PR-2)
+# ===========================================================================
+# Run-level mutable state — async R3 needs this for cancel + progress
+RUN_REWRITE_STATE: dict[str, dict] = {}        # {run_id: {status, done, total, started_at, result}}
+RUN_REWRITE_CANCEL: dict[str, bool] = {}       # {run_id: bool} — set True to cancel mid-batch
+
+
+@app.get("/rewrite/cards")
+def rewrite_cards_spec():
+    """Return all 12 card definitions for the directive UI."""
+    from ..phases.rewrite_cards import cards_to_ui_dict
+    return JSONResponse(cards_to_ui_dict())
+
+
+@app.get("/rewrite/{run_id}/directive", response_class=HTMLResponse)
+def rewrite_directive_page(request: Request, run_id: str):
+    """R2: card + free-text directive page."""
+    from ..phases.rewrite_cards import cards_to_ui_dict
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+
+    eligible = [p for p in run.source_prompts if p.selected and not p.failed_to_rewrite]
+    return templates.TemplateResponse(request, "rewrite_directive.html", {
+        "run": run,
+        "eligible_count": len(eligible),
+        "failed_count": sum(1 for p in run.source_prompts if p.failed_to_rewrite),
+        "cards_ui": cards_to_ui_dict(),
+        "phase_order": PHASE_ORDER,
+        "phase_label": PHASE_LABEL_ZH,
+    })
+
+
+@app.post("/rewrite/{run_id}/directive")
+async def rewrite_directive_save(run_id: str, request: Request):
+    """R2 save: accept JSON RewriteDirective, store on run."""
+    from ..core.rewrite_schema import RewriteDirective, Transform
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+
+    body = await request.json()
+    try:
+        # Body shape: {transforms: [{id, params, order}], free_text, target_capability}
+        transforms = []
+        for t in body.get("transforms") or []:
+            from ..phases.rewrite_cards import card_for
+            card = card_for(t.get("id"))
+            if card is None:
+                continue
+            transforms.append(Transform(
+                id=t["id"],
+                name_zh=card.name_zh,
+                params=t.get("params") or {},
+                order=int(t.get("order", 0)),
+            ))
+        directive = RewriteDirective(
+            transforms=transforms,
+            free_text=(body.get("free_text") or "").strip(),
+            target_capability=body.get("target_capability") or None,
+            preserve_original=bool(body.get("preserve_original", True)),
+            selected_source_ids=body.get("selected_source_ids") or [],
+        )
+    except Exception as exc:
+        code = "DIRECTIVE_EMPTY" if "至少一项非空" in str(exc) else "DIRECTIVE_CONFLICT"
+        return JSONResponse(
+            {"ok": False, "code": code, "message": str(exc)},
+            status_code=400,
+        )
+
+    run.rewrite_directive = directive
+    run.updated_at = datetime.now()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/rewrite/{run_id}/start")
+def rewrite_start(run_id: str, background_tasks: BackgroundTasks):
+    """R3: kick off async rewrite. Returns 303 to a 'generating' page."""
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+    if not run.rewrite_directive:
+        return JSONResponse(
+            {"ok": False, "code": "DIRECTIVE_EMPTY", "message": "请先选卡片或写自由意图"},
+            status_code=400,
+        )
+    cur = RUN_REWRITE_STATE.get(run_id, {})
+    if cur.get("status") == "running":
+        return JSONResponse(
+            {"ok": False, "code": "ALREADY_RUNNING", "message": "改写已在进行"},
+            status_code=409,
+        )
+
+    # Build client
+    creds = RUN_CREDS.get(run_id)
+    if not creds or not creds.get("api_key"):
+        return JSONResponse(
+            {"ok": False, "code": "NO_API_KEY", "message": "改写需要 API key"},
+            status_code=400,
+        )
+    client = llm_phases.build_client(
+        provider=creds["provider"],
+        model=creds.get("model_p2") or creds["model"],
+        api_key=creds["api_key"],
+        base_url=creds.get("base_url") or None,
+    )
+
+    # Init state + clear prior cancel flag
+    eligible = [p for p in run.source_prompts if p.selected and not p.failed_to_rewrite]
+    if run.rewrite_directive.selected_source_ids:
+        idset = set(run.rewrite_directive.selected_source_ids)
+        eligible = [p for p in eligible if p.source_id in idset]
+    RUN_REWRITE_STATE[run_id] = {
+        "status": "running",
+        "done": 0,
+        "total": len(eligible),
+        "started_at": datetime.now().isoformat(),
+        "result": None,
+    }
+    RUN_REWRITE_CANCEL[run_id] = False
+
+    # Advance phase so /runs/{id} renders the generating template (with rewrite poller)
+    run.phase = Phase.P3_QA
+    run.updated_at = datetime.now()
+
+    background_tasks.add_task(_run_rewrite_background, run_id, client)
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+def _run_rewrite_background(run_id: str, client):
+    """Background task: actually do the rewrite."""
+    from ..phases.rewrite import rewrite_run
+    run = RUNS.get(run_id)
+    if not run:
+        return
+
+    def _progress(done: int, total: int):
+        st = RUN_REWRITE_STATE.get(run_id) or {}
+        st["done"] = done
+        st["total"] = total
+        RUN_REWRITE_STATE[run_id] = st
+
+    def _cancelled() -> bool:
+        return RUN_REWRITE_CANCEL.get(run_id, False)
+
+    try:
+        result = rewrite_run(run, client, progress_cb=_progress, cancel_flag=_cancelled)
+        RUN_REWRITE_STATE[run_id] = {
+            "status": "cancelled" if result.cancelled else "completed",
+            "done": _progress_done(run_id),
+            "total": RUN_REWRITE_STATE.get(run_id, {}).get("total", 0),
+            "result": {
+                "succeeded": result.succeeded,
+                "failed": result.failed,
+                "cancelled": result.cancelled,
+                "elapsed_seconds": round(result.elapsed_seconds, 1),
+                "error_breakdown": result.error_breakdown,
+            },
+        }
+        # On success, advance phase to P4 review (rewrite uses same review)
+        if not result.cancelled and result.succeeded > 0:
+            run.phase = Phase.P4_REVIEW
+        run.updated_at = datetime.now()
+    except Exception as exc:
+        RUN_REWRITE_STATE[run_id] = {
+            "status": "failed",
+            "done": _progress_done(run_id),
+            "total": RUN_REWRITE_STATE.get(run_id, {}).get("total", 0),
+            "result": {"error": f"{type(exc).__name__}: {exc}"},
+        }
+        print(f"[rewrite-failed] run={run_id}: {exc}", flush=True)
+
+
+def _progress_done(run_id: str) -> int:
+    return RUN_REWRITE_STATE.get(run_id, {}).get("done", 0)
+
+
+@app.post("/rewrite/{run_id}/cancel")
+def rewrite_cancel(run_id: str):
+    """R3 cancel: signal background task to stop after current batch."""
+    if run_id not in RUN_REWRITE_STATE:
+        return JSONResponse(
+            {"ok": False, "code": "NOT_RUNNING", "message": "没有改写任务可取消"},
+            status_code=409,
+        )
+    RUN_REWRITE_CANCEL[run_id] = True
+    return JSONResponse({"ok": True, "message": "已发取消信号,等待当前批次完成"})
+
+
+@app.get("/rewrite/{run_id}/progress")
+def rewrite_progress(run_id: str):
+    """Polled by the UI 'generating' page."""
+    st = RUN_REWRITE_STATE.get(run_id)
+    if not st:
+        return JSONResponse({"status": "not_started", "done": 0, "total": 0})
+    return JSONResponse(st)
 
 
 @app.post("/runs/{run_id}/slug")

@@ -548,6 +548,149 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
 
 
 # ---------------------------------------------------------------------------
+# R3 Rewrite — batched LLM rewrite of existing SourcePrompts
+# ---------------------------------------------------------------------------
+
+_REWRITE_SYSTEM = """你是 T2V 评测 prompt 改写专家。
+
+任务:对用户上传的原 prompt 列表批量改写,应用给定的「卡片指令」(结构化)和「自由意图」(用户描述)。
+
+要求:
+- 改写后保持中文 30-120 字 / 英文 15-60 词
+- 改写后必须仍然描述**有动作、有时序**的 5 秒视频画面,不要静态描述
+- 必须保留原 prompt 的"核心意图"(主题、关键对象),只在卡片要求的维度上改
+- 如果原 prompt 是英文,改写后输出双语 prompt_zh + prompt_en
+- 如果原 prompt 是中文,改写后输出 prompt_zh,prompt_en 可空字符串
+- 每条 prompt 必须给出 rewrite_diff:一句话说明"改了什么"(15-40 字)
+- subject_type 必填(human/animal/object/vehicle/natural_phenomenon/abstract_effect)
+- subject_count 必填(整数, 1/2/3+)
+
+输出严格 JSON,顶层 prompts 数组:
+{
+  "prompts": [
+    {
+      "source_id": "原条目 id",
+      "prompt_zh": "...",
+      "prompt_en": "...",
+      "subject_type": "human",
+      "subject_count": 2,
+      "is_stress": false,
+      "difficulty": "medium" | "hard",
+      "rewrite_diff": "把单人改成双人 + 加 3 段时序"
+    }
+  ]
+}
+
+如果某条原 prompt 改写失败,在数组里**省略它**(不要塞错误占位)。我会按 source_id 知道哪条没回。"""
+
+
+def _build_rewrite_directive_text(directive) -> str:
+    """Render directive (transforms + free_text) into the LLM user message."""
+    from ..phases.rewrite_cards import card_for, render_card
+    lines: list[str] = []
+    if directive.transforms:
+        lines.append("【应用以下卡片(依序生效)】")
+        for t in sorted(directive.transforms, key=lambda x: x.order):
+            card = card_for(t.id)
+            if card is None:
+                continue
+            fragment = render_card(card, t.params)
+            lines.append(f"  {t.order + 1}. [{card.name_zh}] {fragment}")
+    if directive.free_text.strip():
+        lines.append("\n【自由意图(补充)】")
+        lines.append(directive.free_text.strip())
+    if directive.target_capability:
+        lines.append(f"\n【关联评测能力】{directive.target_capability}")
+    return "\n".join(lines)
+
+
+def rewrite_prompts_real(
+    source_prompts: list,
+    directive,
+    client: LLMClient,
+    temperature: float = 0.4,
+) -> tuple[list[PromptEntry], list[str]]:
+    """LLM-backed batch rewrite.
+
+    Returns (new_entries, failed_source_ids).
+    New entries are not yet attached to a Run; caller is responsible.
+    """
+    if not source_prompts:
+        return [], []
+
+    directive_text = _build_rewrite_directive_text(directive)
+    sp_payload = [
+        {
+            "source_id": sp.source_id,
+            "original_zh": sp.original_text,
+            "original_en": sp.original_text_en or "",
+            "metadata": sp.metadata,
+        }
+        for sp in source_prompts
+    ]
+    user_msg = (
+        f"{directive_text}\n\n"
+        f"【待改写 {len(source_prompts)} 条】\n"
+        f"{json.dumps(sp_payload, ensure_ascii=False, indent=2)}\n\n"
+        f"按 JSON schema 输出改写后的 prompts 数组。"
+    )
+
+    resp = client.generate(
+        messages=[{"role": "user", "content": user_msg}],
+        system=_REWRITE_SYSTEM,
+        json_schema={"required": ["prompts"]},
+        temperature=temperature,
+        max_tokens=8000,
+    )
+    data = resp.content if isinstance(resp.content, dict) else json.loads(resp.content)
+
+    items = data.get("prompts") or []
+    received_ids = {str(item.get("source_id")) for item in items if item.get("source_id")}
+    submitted_ids = {sp.source_id for sp in source_prompts}
+    failed_ids = sorted(submitted_ids - received_ids)
+
+    out: list[PromptEntry] = []
+    for item in items:
+        sid = str(item.get("source_id") or "")
+        if not sid or sid not in submitted_ids:
+            continue
+        try:
+            prompt_zh = (item.get("prompt_zh") or "").strip()
+            prompt_en = (item.get("prompt_en") or "").strip()
+            if not prompt_zh:
+                # No usable text — mark this id as failed
+                failed_ids.append(sid)
+                continue
+            entry = PromptEntry(
+                id=f"rw_{sid}",
+                capability="(rewrite)",     # caller overwrites
+                capability_version=1,
+                difficulty=item.get("difficulty") or "medium",
+                difficulty_score=0.0,         # P3 will rescore
+                is_stress=bool(item.get("is_stress")),
+                sl2_covered=[],
+                axes_values={},
+                subject_count=int(item.get("subject_count", 1) or 1),
+                action_count=int(item.get("action_count", 1) or 1),
+                camera_zh=item.get("camera_zh"),
+                camera_en=item.get("camera_en"),
+                prompt_zh=prompt_zh,
+                prompt_en=prompt_en,
+                subject_type=item.get("subject_type") or "human",
+                generated_at=datetime.now(),
+                source_id=sid,
+                rewrite_diff=(item.get("rewrite_diff") or "")[:240] or None,
+            )
+            out.append(entry)
+        except Exception:
+            failed_ids.append(sid)
+
+    # Dedupe in case the same id failed both pathways
+    failed_ids = sorted(set(failed_ids))
+    return out, failed_ids
+
+
+# ---------------------------------------------------------------------------
 # Phase 3 — QA (real, batched LLM judges)
 # ---------------------------------------------------------------------------
 

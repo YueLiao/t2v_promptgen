@@ -1,7 +1,98 @@
 {% extends "base.html" %}
-{% block title %}生成中 ｜ {{ run.id }}{% endblock %}
+{% block title %}生成中 | {{ run.id }}{% endblock %}
 
 {% block content %}
+{% if run.source == 'rewrite' %}
+<!-- ============= REWRITE MODE: poll /rewrite/.../progress ============= -->
+<div class="max-w-2xl mx-auto bg-white rounded-xl shadow-sm border border-slate-200 p-10 text-center"
+     x-data="rewriteProgress()" x-init="poll()">
+  <div class="inline-block animate-spin h-12 w-12 border-4 border-orange-500 border-t-transparent rounded-full mb-5"
+       :class="status === 'completed' ? 'animate-none border-green-500' : (status === 'failed' ? 'animate-none border-red-500' : '')"></div>
+
+  <h2 class="text-xl font-bold text-slate-900 mb-2">
+    <span x-show="status === 'running'">正在批量改写…</span>
+    <span x-show="status === 'completed'" x-cloak>改写完成 ✓</span>
+    <span x-show="status === 'cancelled'" x-cloak>已取消</span>
+    <span x-show="status === 'failed'" x-cloak>改写失败</span>
+  </h2>
+
+  <!-- Progress bar -->
+  <div class="my-4">
+    <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
+      <div class="h-3 bg-orange-500 transition-all"
+           :style="'width: ' + percent() + '%'"></div>
+    </div>
+    <p class="text-sm text-slate-600 mt-2">
+      <span x-text="done"></span> / <span x-text="total"></span> 条
+      (<span x-text="percent()"></span>%)
+    </p>
+  </div>
+
+  <!-- Result summary -->
+  <div x-show="result" x-cloak class="my-4 text-xs text-slate-600 space-y-1">
+    <div>耗时:<span x-text="result?.elapsed_seconds + 's'"></span></div>
+    <div>成功:<span class="text-green-700 font-medium" x-text="result?.succeeded"></span> 条</div>
+    <div x-show="result?.failed > 0">失败:<span class="text-amber-700 font-medium" x-text="result?.failed"></span> 条</div>
+    <div x-show="result?.error" class="text-red-700" x-text="result?.error"></div>
+  </div>
+
+  <!-- Actions -->
+  <div class="mt-6 flex items-center justify-center gap-2">
+    <button x-show="status === 'running'" @click="cancel()" :disabled="cancelling"
+            class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded">
+      <span x-show="!cancelling">⏸ 取消</span>
+      <span x-show="cancelling">已发取消信号...</span>
+    </button>
+    <a x-show="status !== 'running'" x-cloak href="/runs/{{ run.id }}"
+       class="text-sm bg-orange-500 hover:bg-orange-600 text-white px-5 py-2 rounded-lg">
+      去审核 →
+    </a>
+  </div>
+</div>
+
+<script>
+function rewriteProgress() {
+  return {
+    status: 'running',
+    done: 0,
+    total: {{ run.source_prompts|length }},
+    result: null,
+    cancelling: false,
+    percent() { return this.total ? Math.round(100 * this.done / this.total) : 0; },
+    async poll() {
+      while (true) {
+        try {
+          const r = await fetch('/rewrite/{{ run.id }}/progress');
+          const data = await r.json();
+          this.status = data.status || 'running';
+          this.done = data.done || 0;
+          this.total = data.total || this.total;
+          this.result = data.result || null;
+          if (this.status !== 'running') {
+            // Brief pause then auto-redirect to review
+            if (this.status === 'completed') {
+              setTimeout(() => window.location.href = '/runs/{{ run.id }}', 1200);
+            }
+            break;
+          }
+        } catch (e) { /* keep polling */ }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    },
+    async cancel() {
+      this.cancelling = true;
+      try {
+        await fetch('/rewrite/{{ run.id }}/cancel', {method: 'POST'});
+      } finally {
+        // poll loop will detect cancelled status
+      }
+    },
+  };
+}
+</script>
+
+{% else %}
+<!-- ============= GENERATE MODE: existing simple spinner ============= -->
 <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-12 text-center">
   <div class="inline-block animate-spin h-12 w-12 border-4 border-orange-500 border-t-transparent rounded-full mb-6"></div>
   <h2 class="text-xl font-bold text-slate-900 mb-2">正在生成 {{ run.target_set_size }} 条测试用例</h2>
@@ -9,4 +100,5 @@
   <p class="text-xs text-slate-400 mt-4">马上跳到审核页…</p>
   <meta http-equiv="refresh" content="1; url=/runs/{{ run.id }}">
 </div>
+{% endif %}
 {% endblock %}

@@ -19,16 +19,25 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 SourceFormat = Literal["json", "jsonl", "txt", "csv", "xlsx"]
 
 TransformId = Literal[
-    # MVP 6 cards (PR-2)
+    # 主体类
     "subject_swap",
+    "add_interaction",
+    "add_micro_action",
+    # 场景类
     "scene_shift",
-    "difficulty_up",
     "style_apply",
     "camera_set",
-    "speed_adjust",
-    # Deferred to v0.10 — reserved here to keep id stable
-    "multi_subject",
+    # 时序类
     "add_temporal",
+    "add_causal_chain",
+    "add_irreversibility",
+    # 动作类
+    "action_chain_extend",
+    "speed_adjust",
+    # 难度类
+    "difficulty_up",
+    # Reserved for v0.10
+    "multi_subject",
     "localize_zh",
     "stress_inject",
     "bilingualize",
