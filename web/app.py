@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -584,7 +585,15 @@ def rewrite_map_page(request: Request, run_id: str):
         raise HTTPException(400, "Not a rewrite run")
 
     raw_rows = RUN_RAW_ROWS.get(run_id, [])
-    columns = list(raw_rows[0].keys()) if raw_rows else []
+    # P1-1: union of keys across rows (handle mixed JSON arrays where
+    # different rows have different schemas — e.g. dicts + bare strings)
+    columns: list[str] = []
+    seen = set()
+    for row in raw_rows:
+        for k in row.keys():
+            if k not in seen:
+                seen.add(k)
+                columns.append(k)
 
     # If mapping not set yet, try guess (LLM if creds available, else heuristic)
     suggestion_text = ""
@@ -651,7 +660,14 @@ def rewrite_map_confirm(
         )
 
     raw_rows = RUN_RAW_ROWS.get(run_id, [])
-    columns = list(raw_rows[0].keys()) if raw_rows else []
+    # P1-1: union of keys across all rows
+    columns: list[str] = []
+    seen_cols = set()
+    for row in raw_rows:
+        for k in row.keys():
+            if k not in seen_cols:
+                seen_cols.add(k)
+                columns.append(k)
 
     # Verify mapped column names exist in the file
     for key, val in [("prompt_zh", mapping.prompt_zh),
@@ -664,22 +680,41 @@ def rewrite_map_confirm(
                 status_code=400,
             )
 
-    # Build normalized SourcePrompt records
+    # Build normalized SourcePrompt records with source_id sanitization
+    # (P0-2) and de-duplication (P0-3)
     source_prompts: list[SourcePrompt] = []
+    seen_ids: dict[str, int] = {}      # sanitized_id → next-suffix counter
     for idx, row in enumerate(raw_rows):
-        sid = str(row.get(mapping.source_id, idx + 1)) if mapping.source_id else str(idx + 1)
+        raw_sid = str(row.get(mapping.source_id, idx + 1)) if mapping.source_id else str(idx + 1)
+
+        # P0-2: sanitize source_id — only [a-zA-Z0-9_-], everything else → _
+        sid = re.sub(r"[^a-zA-Z0-9_\-]", "_", raw_sid).strip("_")[:64] or str(idx + 1)
+
+        # P0-3: de-duplicate (preserves order, appends _2/_3/... on collisions)
+        if sid in seen_ids:
+            seen_ids[sid] += 1
+            sid = f"{sid}_{seen_ids[sid]}"
+            # Make sure suffixed version isn't itself a dup (rare)
+            while sid in seen_ids:
+                seen_ids[sid.rsplit('_', 1)[0]] += 1
+                sid = f"{sid.rsplit('_', 1)[0]}_{seen_ids[sid.rsplit('_', 1)[0]]}"
+        seen_ids[sid] = 1
+
         zh = str(row.get(mapping.prompt_zh) or "").strip() if mapping.prompt_zh else ""
         en = str(row.get(mapping.prompt_en) or "").strip() if mapping.prompt_en else ""
 
-        # Metadata = everything else
+        # Metadata = everything else (preserve original raw id for traceability)
         meta = {k: v for k, v in row.items()
                 if k not in (mapping.prompt_zh, mapping.prompt_en, mapping.source_id)}
+        if mapping.source_id and raw_sid != sid:
+            meta["_original_source_id"] = raw_sid    # so user can join back
 
         text_for_source = zh or en   # at least one is required per validator
         if not text_for_source:
             # Row had empty content under both mapped columns; mark failed
+            # P1-5: use empty string, not "(empty)" literal
             sp = SourcePrompt(
-                source_id=sid, original_text="(empty)",
+                source_id=sid, original_text="(empty row)",
                 metadata=meta, selected=False,
                 failed_to_rewrite=True,
                 fail_reason="empty after mapping",
@@ -712,6 +747,7 @@ def rewrite_map_confirm(
 # Run-level mutable state — async R3 needs this for cancel + progress
 RUN_REWRITE_STATE: dict[str, dict] = {}        # {run_id: {status, done, total, started_at, result}}
 RUN_REWRITE_CANCEL: dict[str, bool] = {}       # {run_id: bool} — set True to cancel mid-batch
+_REWRITE_STATE_LOCK = threading.Lock()         # P0-5: protect check-then-set on RUN_REWRITE_STATE
 
 
 @app.get("/rewrite/cards")
@@ -793,16 +829,30 @@ def rewrite_start(run_id: str, background_tasks: BackgroundTasks):
             {"ok": False, "code": "DIRECTIVE_EMPTY", "message": "请先选卡片或写自由意图"},
             status_code=400,
         )
-    cur = RUN_REWRITE_STATE.get(run_id, {})
-    if cur.get("status") == "running":
-        return JSONResponse(
-            {"ok": False, "code": "ALREADY_RUNNING", "message": "改写已在进行"},
-            status_code=409,
-        )
+    # P0-5: atomic check-then-set
+    with _REWRITE_STATE_LOCK:
+        cur = RUN_REWRITE_STATE.get(run_id, {})
+        if cur.get("status") in ("running", "qa_running"):
+            return JSONResponse(
+                {"ok": False, "code": "ALREADY_RUNNING", "message": "改写已在进行"},
+                status_code=409,
+            )
+        # Reserve the slot before doing any other work
+        RUN_REWRITE_STATE[run_id] = {
+            "status": "running",
+            "done": 0,
+            "total": 0,                    # filled below
+            "started_at": datetime.now().isoformat(),
+            "result": None,
+        }
+        RUN_REWRITE_CANCEL[run_id] = False
 
     # Build client
     creds = RUN_CREDS.get(run_id)
     if not creds or not creds.get("api_key"):
+        # Roll back the reserved slot
+        with _REWRITE_STATE_LOCK:
+            RUN_REWRITE_STATE.pop(run_id, None)
         return JSONResponse(
             {"ok": False, "code": "NO_API_KEY", "message": "改写需要 API key"},
             status_code=400,
@@ -814,19 +864,12 @@ def rewrite_start(run_id: str, background_tasks: BackgroundTasks):
         base_url=creds.get("base_url") or None,
     )
 
-    # Init state + clear prior cancel flag
     eligible = [p for p in run.source_prompts if p.selected and not p.failed_to_rewrite]
     if run.rewrite_directive.selected_source_ids:
         idset = set(run.rewrite_directive.selected_source_ids)
         eligible = [p for p in eligible if p.source_id in idset]
-    RUN_REWRITE_STATE[run_id] = {
-        "status": "running",
-        "done": 0,
-        "total": len(eligible),
-        "started_at": datetime.now().isoformat(),
-        "result": None,
-    }
-    RUN_REWRITE_CANCEL[run_id] = False
+    # Update total now that we know it
+    RUN_REWRITE_STATE[run_id]["total"] = len(eligible)
 
     # Advance phase so /runs/{id} renders the generating template (with rewrite poller)
     run.phase = Phase.P3_QA
@@ -855,7 +898,9 @@ def _run_rewrite_background(run_id: str, client):
     try:
         result = rewrite_run(run, client, progress_cb=_progress, cancel_flag=_cancelled)
 
-        # Don't flip status to "completed" yet — R4 quality judges still to run
+        # Run R4 judges when we have at least one entry; phase always advances
+        # to P4 on completion (even if all failed) so user can see what
+        # happened instead of being stuck on the generating page.
         if not result.cancelled and result.succeeded > 0:
             RUN_REWRITE_STATE[run_id] = {
                 "status": "qa_running",
@@ -867,6 +912,10 @@ def _run_rewrite_background(run_id: str, client):
                 _run_r4_quality(run_id, run, client)
             except Exception as q_exc:
                 print(f"[R4 failed but continuing] run={run_id}: {q_exc}", flush=True)
+
+        # P0-1 fix: always advance phase on terminal status (completed OR all-failed),
+        # not only when succeeded>0. Otherwise UI gets stuck in redirect loop.
+        if not result.cancelled:
             run.phase = Phase.P4_REVIEW
 
         RUN_REWRITE_STATE[run_id] = {
@@ -953,14 +1002,24 @@ def _run_r4_quality(run_id: str, run, client) -> None:
 
     summary = attach_scores_to_entries(pairs, keep, adh)
 
-    # Set qa_passed flag and needs_human_review based on aggregate
+    # P0-6 fix: don't treat "no score" as "pass". When a judge batch failed,
+    # the score is None — we mark needs_human_review and clear qa_passed.
     KEEP_TH, ADH_TH = 5, 7
     for _, pe in pairs:
-        k_ok = pe.rewrite_kept_score is None or pe.rewrite_kept_score >= KEEP_TH
-        a_ok = pe.rewrite_adherence_score is None or pe.rewrite_adherence_score >= ADH_TH
         rule_ok = not pe.qa_rule_errors
-        pe.qa_passed = bool(rule_ok and k_ok and a_ok)
-        pe.needs_human_review = not pe.qa_passed
+        has_keep = pe.rewrite_kept_score is not None
+        has_adh = pe.rewrite_adherence_score is not None
+        k_ok = has_keep and pe.rewrite_kept_score >= KEEP_TH
+        a_ok = has_adh and pe.rewrite_adherence_score >= ADH_TH
+
+        if not has_keep or not has_adh:
+            # Judge didn't return a score for this entry — explicitly UNKNOWN,
+            # not "pass". UI shows ⚠ "未打分" so user reviews manually.
+            pe.qa_passed = False
+            pe.needs_human_review = True
+        else:
+            pe.qa_passed = bool(rule_ok and k_ok and a_ok)
+            pe.needs_human_review = not pe.qa_passed
 
     RUN_QA_REPORTS[run_id] = {
         "total": summary["total"],
@@ -1036,16 +1095,38 @@ async def rewrite_iterate(run_id: str, request: Request, background_tasks: Backg
     refinement = (body.get("refinement") or "").strip()
 
     if not rejected:
-        # No-op: nothing to iterate
         return JSONResponse({"ok": False, "code": "NO_REJECTED",
                               "message": "没有被拒绝的条目可改"}, status_code=400)
     if run.rewrite_round >= run.rewrite_max_rounds:
         return JSONResponse({"ok": False, "code": "MAX_ROUNDS_REACHED",
                               "message": f"已用完 {run.rewrite_max_rounds} 轮迭代"},
                              status_code=400)
+    # P1-6: only iterate from review phase
+    if run.phase != Phase.P4_REVIEW:
+        return JSONResponse({"ok": False, "code": "BAD_PHASE",
+                              "message": f"只能在审核页迭代,当前 phase={run.phase.value}"},
+                             status_code=400)
+
+    # P0-5: atomic check + reserve slot
+    with _REWRITE_STATE_LOCK:
+        cur = RUN_REWRITE_STATE.get(run_id, {})
+        if cur.get("status") in ("running", "qa_running"):
+            return JSONResponse({"ok": False, "code": "ALREADY_RUNNING",
+                                  "message": "另一个改写任务在进行"},
+                                 status_code=409)
+        RUN_REWRITE_STATE[run_id] = {
+            "status": "running",
+            "done": 0,
+            "total": len(rejected),
+            "started_at": datetime.now().isoformat(),
+            "result": None,
+        }
+        RUN_REWRITE_CANCEL[run_id] = False
 
     creds = RUN_CREDS.get(run_id)
     if not creds or not creds.get("api_key"):
+        with _REWRITE_STATE_LOCK:
+            RUN_REWRITE_STATE.pop(run_id, None)
         return JSONResponse({"ok": False, "code": "NO_API_KEY",
                               "message": "改写需要 API key"}, status_code=400)
     client = llm_phases.build_client(
@@ -1055,15 +1136,6 @@ async def rewrite_iterate(run_id: str, request: Request, background_tasks: Backg
         base_url=creds.get("base_url") or None,
     )
 
-    # Mark state as running again so UI polls show progress
-    RUN_REWRITE_STATE[run_id] = {
-        "status": "running",
-        "done": 0,
-        "total": len(rejected),
-        "started_at": datetime.now().isoformat(),
-        "result": None,
-    }
-    RUN_REWRITE_CANCEL[run_id] = False
     run.phase = Phase.P3_QA
     run.updated_at = datetime.now()
 
@@ -1078,8 +1150,15 @@ def _run_iterate_background(run_id: str, rejected_ids: list[str], refinement: st
     if not run:
         return
 
+    # P1-2: progress callback for iterate path
+    def _progress(done: int, total: int):
+        st = RUN_REWRITE_STATE.get(run_id) or {}
+        st["done"] = done
+        st["total"] = total
+        RUN_REWRITE_STATE[run_id] = st
+
     try:
-        result = iterate_fn(run, rejected_ids, refinement, client)
+        result = iterate_fn(run, rejected_ids, refinement, client, progress_cb=_progress)
         # Re-run R4 quality scores on the whole set (cheap enough)
         try:
             _run_r4_quality(run_id, run, client)
@@ -1104,6 +1183,9 @@ def _run_iterate_background(run_id: str, rejected_ids: list[str], refinement: st
             "done": 0, "total": len(rejected_ids),
             "result": {"error": f"{type(exc).__name__}: {exc}"},
         }
+        # P0-1 fix (iterate path): also advance phase so UI doesn't loop
+        run.phase = Phase.P4_REVIEW
+        run.updated_at = datetime.now()
         print(f"[iterate-failed] run={run_id}: {exc}", flush=True)
 
 
@@ -1449,9 +1531,20 @@ async def download_coverage(run_id: str):
 # Run management
 # ---------------------------------------------------------------------------
 
+def _cleanup_run_state(run_id: str) -> None:
+    """P0-4: clean every state dict that may reference run_id.
+
+    Centralized so adding new state dicts doesn't risk leaks.
+    """
+    for d in (RUNS, RUN_CREDS, RUN_RAW_ROWS, RUN_REWRITE_STATE,
+              RUN_REWRITE_CANCEL, RUN_QA_REPORTS, RUN_DIM_CRITIQUE,
+              RUN_LAST_ERROR, RUN_INTAKE):
+        d.pop(run_id, None)
+
+
 @app.post("/runs/{run_id}/delete")
 async def delete_run(run_id: str):
-    RUNS.pop(run_id, None)
+    _cleanup_run_state(run_id)
     return RedirectResponse("/", status_code=303)
 
 

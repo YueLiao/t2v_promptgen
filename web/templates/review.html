@@ -125,6 +125,10 @@
               {% if p.rewrite_kept_score >= 5 %}bg-green-100 text-green-800{% else %}bg-red-100 text-red-800{% endif %}">
               keep {{ p.rewrite_kept_score }}/10
             </span>
+            {% else %}
+            <span class="px-2 py-0.5 rounded font-medium bg-slate-200 text-slate-600" title="judge 失败,未打分">
+              keep ⚠
+            </span>
             {% endif %}
             {% if p.rewrite_adherence_score is not none %}
             <span class="px-2 py-0.5 rounded font-medium
@@ -132,6 +136,10 @@
               {% elif p.rewrite_adherence_score >= 5 %}bg-amber-100 text-amber-800
               {% else %}bg-red-100 text-red-800{% endif %}">
               adh {{ p.rewrite_adherence_score }}/10
+            </span>
+            {% else %}
+            <span class="px-2 py-0.5 rounded font-medium bg-slate-200 text-slate-600" title="judge 失败,未打分">
+              adh ⚠
             </span>
             {% endif %}
             {% if p.qa_rule_errors %}

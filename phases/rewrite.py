@@ -131,6 +131,7 @@ def iterate_rewrite(
     rejected_source_ids: list[str],
     refinement_text: str,
     client,
+    progress_cb: ProgressCallback | None = None,    # P1-2
 ) -> RewriteResult:
     """R5 iteration: only rewrite the rejected subset with appended refinement.
 
@@ -158,9 +159,14 @@ def iterate_rewrite(
             sp.failed_to_rewrite = False
             sp.fail_reason = None
 
-    # Build a transient directive copy with appended refinement + scope
+    # Build a transient directive copy with appended refinement + scope.
+    # P2-2: only append "附加修改:" header if refinement is non-empty.
+    new_free_text = run.rewrite_directive.free_text
+    if refinement_text and refinement_text.strip():
+        sep = "\n\n附加修改:\n" if new_free_text else ""
+        new_free_text = (new_free_text + sep + refinement_text.strip()).strip()
     directive = run.rewrite_directive.model_copy(update={
-        "free_text": (run.rewrite_directive.free_text + "\n\n附加修改:\n" + refinement_text).strip(),
+        "free_text": new_free_text,
         "selected_source_ids": list(rejected_source_ids),
     })
 
@@ -168,9 +174,11 @@ def iterate_rewrite(
     orig_directive = run.rewrite_directive
     run.rewrite_directive = directive
     try:
-        result = rewrite_run(run, client)
+        result = rewrite_run(run, client, progress_cb=progress_cb)
     finally:
         run.rewrite_directive = orig_directive
 
-    run.rewrite_round += 1
+    # P2-3: only count a round if something actually changed
+    if result.succeeded > 0 or result.failed > 0:
+        run.rewrite_round += 1
     return result
