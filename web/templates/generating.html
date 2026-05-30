@@ -42,13 +42,17 @@
     <button x-show="status === 'running'" @click="cancel()" :disabled="cancelling"
             class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded">
       <span x-show="!cancelling">⏸ 取消</span>
-      <span x-show="cancelling">已发取消信号...</span>
+      <span x-show="cancelling">已发取消信号(等当前批次跑完,最多 ~5 秒)...</span>
     </button>
-    <a x-show="status !== 'running'" x-cloak href="/runs/{{ run.id }}"
+    <a x-show="status === 'completed' || status === 'failed' || status === 'cancelled'" x-cloak href="/runs/{{ run.id }}"
        class="text-sm bg-orange-500 hover:bg-orange-600 text-white px-5 py-2 rounded-lg">
       去审核 →
     </a>
   </div>
+  <!-- P1-8: cancel wait note -->
+  <p x-show="cancelling" x-cloak class="text-xs text-slate-500 mt-2">
+    LLM 批次必须跑完才能停。如果想立即丢弃,关掉这个标签页就行,服务端任务会在跑完后自动归档。
+  </p>
 </div>
 
 <script>

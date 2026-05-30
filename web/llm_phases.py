@@ -640,7 +640,7 @@ def rewrite_prompts_real(
         system=_REWRITE_SYSTEM,
         json_schema={"required": ["prompts"]},
         temperature=temperature,
-        max_tokens=8000,
+        max_tokens=12000,    # P2-1: 10 prompts × bilingual + diff easily exceeds 8k
     )
     data = resp.content if isinstance(resp.content, dict) else json.loads(resp.content)
 

@@ -79,7 +79,8 @@
                 class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg">
           ↻ 让 AI 改一遍拒绝的
         </button>
-        <form method="POST" action="/rewrite/{{ run.id }}/confirm" class="inline">
+        <form method="POST" action="/rewrite/{{ run.id }}/confirm" class="inline"
+              @submit="return confirmExport($event)">
           <button type="submit"
                   class="bg-orange-500 hover:bg-orange-600 text-white text-sm px-4 py-1.5 rounded-lg">
             ✓ 通过 → 导出
@@ -214,6 +215,15 @@ function rewriteReview() {
           this.decisions[pid] = action === 'accept' ? true : false;
         }
       } catch (e) { console.error(e); }
+    },
+    confirmExport(e) {
+      // P2-9: warn before dropping rejected entries
+      const rejN = this.rejectedCount;
+      if (rejN > 0 && !confirm(`将丢弃 ${rejN} 条被拒绝的产物,无法恢复。确认导出?`)) {
+        e.preventDefault();
+        return false;
+      }
+      return true;
     },
     async acceptAll() {
       for (const pid of Object.keys(this.decisions)) await this.decide(pid, 'accept');

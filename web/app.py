@@ -204,13 +204,28 @@ PHASE_LABEL_ZH = {
     Phase.DONE: "完成",
 }
 
+# P2-6: rewrite-mode tracker labels (R0-R6 maps internally onto P0-P5)
+PHASE_LABEL_REWRITE = {
+    Phase.P0_INTAKE: "上传文件",
+    Phase.P1_DIMENSIONS: "字段映射",
+    Phase.P2_PROMPTS: "改写指令",
+    Phase.P3_QA: "改写中",
+    Phase.P4_REVIEW: "审核确认",
+    Phase.P5_EXPORT: "导出结果",
+    Phase.DONE: "完成",
+}
+
 
 def _ctx(run: Run, **extra) -> dict:
-    """Build common template context."""
+    """Build common template context.
+
+    P2-6: pick rewrite-mode phase labels when run.source == 'rewrite'.
+    """
+    labels = PHASE_LABEL_REWRITE if run.source == "rewrite" else PHASE_LABEL_ZH
     return {
         "run": run,
         "phase_order": PHASE_ORDER,
-        "phase_label": PHASE_LABEL_ZH,
+        "phase_label": labels,
         **extra,
     }
 
@@ -237,6 +252,7 @@ async def index(request: Request):
     return templates.TemplateResponse(request, "index.html", {
         "runs": runs_sorted,
         "phase_label": PHASE_LABEL_ZH,
+        "phase_label_rewrite": PHASE_LABEL_REWRITE,
     })
 
 
@@ -628,7 +644,7 @@ def rewrite_map_page(request: Request, run_id: str):
         "current_mapping": run.field_mapping,
         "suggestion_text": suggestion_text,
         "phase_order": PHASE_ORDER,
-        "phase_label": PHASE_LABEL_ZH,
+        "phase_label": PHASE_LABEL_REWRITE,
     })
 
 
@@ -645,6 +661,15 @@ def rewrite_map_confirm(
     run = _get_run(run_id)
     if run.source != "rewrite":
         raise HTTPException(400, "Not a rewrite run")
+
+    # P1-7: prevent remapping after rewrite started — would orphan run.prompts
+    if run.prompts:
+        return JSONResponse(
+            {"ok": False, "code": "MAPPING_LOCKED",
+             "message": f"已生成 {len(run.prompts)} 条改写产物;重新映射会让它们对不上原文。"
+                        "如果确实要重新映射,先删除当前任务重新开始。"},
+            status_code=409,
+        )
 
     # Build mapping (Pydantic validator requires ≥1 prompt column)
     try:
@@ -766,13 +791,27 @@ def rewrite_directive_page(request: Request, run_id: str):
         raise HTTPException(400, "Not a rewrite run")
 
     eligible = [p for p in run.source_prompts if p.selected and not p.failed_to_rewrite]
+
+    # P1-4: hydrate existing directive into Alpine init state
+    existing = run.rewrite_directive
+    initial_transforms = []
+    initial_free_text = ""
+    if existing:
+        initial_transforms = [
+            {"id": t.id, "name_zh": t.name_zh, "params": t.params, "order": t.order}
+            for t in sorted(existing.transforms, key=lambda x: x.order)
+        ]
+        initial_free_text = existing.free_text or ""
+
     return templates.TemplateResponse(request, "rewrite_directive.html", {
         "run": run,
         "eligible_count": len(eligible),
         "failed_count": sum(1 for p in run.source_prompts if p.failed_to_rewrite),
         "cards_ui": cards_to_ui_dict(),
+        "initial_transforms": initial_transforms,
+        "initial_free_text": initial_free_text,
         "phase_order": PHASE_ORDER,
-        "phase_label": PHASE_LABEL_ZH,
+        "phase_label": PHASE_LABEL_REWRITE,
     })
 
 
@@ -872,8 +911,10 @@ def rewrite_start(run_id: str, background_tasks: BackgroundTasks):
     RUN_REWRITE_STATE[run_id]["total"] = len(eligible)
 
     # Advance phase so /runs/{id} renders the generating template (with rewrite poller)
+    # Phase advance + drop raw rows (source_prompts is the canonical data now)
     run.phase = Phase.P3_QA
     run.updated_at = datetime.now()
+    RUN_RAW_ROWS.pop(run_id, None)    # P2-4: free raw file data after canonicalization
 
     background_tasks.add_task(_run_rewrite_background, run_id, client)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)

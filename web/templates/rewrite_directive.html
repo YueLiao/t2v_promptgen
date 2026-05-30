@@ -2,7 +2,8 @@
 {% block title %}改写指令 | {{ run.id }}{% endblock %}
 
 {% block content %}
-<div class="max-w-5xl mx-auto space-y-4" x-data="directivePanel()">
+<div class="max-w-5xl mx-auto space-y-4"
+     x-data='directivePanel({{ initial_transforms|tojson }}, {{ initial_free_text|tojson }}, {{ cards_ui|tojson }})'>
 
   <!-- Summary card -->
   <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
@@ -68,13 +69,15 @@
                 <label class="text-xs text-slate-600">{{ p.label_zh }}</label>
                 {% if p.type == 'enum' %}
                 <select @change="setParam('{{ card.id }}', '{{ p.key }}', $event.target.value)"
+                        x-bind:value="getParam('{{ card.id }}', '{{ p.key }}', '{{ p.default }}')"
                         class="block w-full border border-slate-300 rounded px-2 py-1 text-xs mt-0.5">
                   {% for opt in p.options %}
-                  <option value="{{ opt }}" {% if opt == p.default %}selected{% endif %}>{{ opt }}</option>
+                  <option value="{{ opt }}">{{ opt }}</option>
                   {% endfor %}
                 </select>
                 {% else %}
-                <input type="text" :value="getParam('{{ card.id }}', '{{ p.key }}', '{{ p.default }}')"
+                <input type="text"
+                       x-bind:value="getParam('{{ card.id }}', '{{ p.key }}', '{{ p.default }}')"
                        @input="setParam('{{ card.id }}', '{{ p.key }}', $event.target.value)"
                        class="block w-full border border-slate-300 rounded px-2 py-1 text-xs mt-0.5">
                 {% endif %}
@@ -125,10 +128,22 @@
 </div>
 
 <script>
-function directivePanel() {
+function directivePanel(initialTransforms, initialFreeText, cardsUi) {
+  // P1-3: build {cardId: {paramKey: defaultValue}} index for default-injection
+  const defaultsByCard = {};
+  for (const g of (cardsUi?.groups || [])) {
+    for (const c of (g.cards || [])) {
+      const params = {};
+      for (const p of (c.params || [])) {
+        params[p.key] = p.default;
+      }
+      defaultsByCard[c.id] = {nameZh: c.name_zh, params};
+    }
+  }
   return {
-    selectedTransforms: [],     // [{id, name_zh, params, order}]
-    freeText: '',
+    // P1-4: hydrate from server-side existing directive
+    selectedTransforms: (initialTransforms || []).map(t => ({...t})),
+    freeText: initialFreeText || '',
     saving: false,
     starting: false,
     error: '',
@@ -137,19 +152,20 @@ function directivePanel() {
       return this.selectedTransforms.some(t => t.id === cardId);
     },
     groupSelected(groupName) {
-      // shown chips when group collapsed — short list of card ids
-      const ids = this.selectedTransforms.map(t => t.id);
-      return ids;     // simple: show all selected ids (cheap)
+      return this.selectedTransforms.map(t => t.id);
     },
     toggle(cardId, nameZh, checked) {
       if (checked && !this.isSelected(cardId)) {
+        // P1-3: seed params with defaults so saved directive carries real values
+        const seed = defaultsByCard[cardId];
         this.selectedTransforms.push({
-          id: cardId, name_zh: nameZh, params: {},
+          id: cardId,
+          name_zh: nameZh,
+          params: seed ? {...seed.params} : {},
           order: this.selectedTransforms.length,
         });
       } else if (!checked) {
         this.selectedTransforms = this.selectedTransforms.filter(t => t.id !== cardId);
-        // re-number order
         this.selectedTransforms.forEach((t, i) => t.order = i);
       }
     },
@@ -159,7 +175,8 @@ function directivePanel() {
     },
     getParam(cardId, key, fallback) {
       const t = this.selectedTransforms.find(x => x.id === cardId);
-      return (t && t.params[key]) || fallback;
+      // P1-3: respect already-set value (incl. hydrated from server)
+      return (t && t.params[key] !== undefined) ? t.params[key] : fallback;
     },
     isValid() {
       return this.selectedTransforms.length > 0 || this.freeText.trim().length > 0;
@@ -199,11 +216,21 @@ function directivePanel() {
       try {
         const saved = await this._saveDirective();
         if (!saved) return;
-        const r = await fetch('/rewrite/{{ run.id }}/start', {method: 'POST'});
-        if (r.redirected) { window.location.href = r.url; return; }
+        // P2-5: manual redirect — avoid downloading the target page twice
+        const r = await fetch('/rewrite/{{ run.id }}/start', {
+          method: 'POST',
+          redirect: 'manual',
+        });
+        if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)) {
+          window.location.href = `/runs/{{ run.id }}`;
+          return;
+        }
         if (!r.ok) {
           const data = await r.json().catch(() => ({}));
           this.error = (data.message || ('启动失败 HTTP ' + r.status)).slice(0, 200);
+        } else {
+          // Server didn't redirect (unexpected) — still navigate
+          window.location.href = `/runs/{{ run.id }}`;
         }
       } finally { this.starting = false; }
     },
