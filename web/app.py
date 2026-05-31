@@ -1065,8 +1065,12 @@ async def rewrite_seed_set(run_id: str, request: Request):
         body = {}
     raw = body.get("seed") if isinstance(body, dict) else None
     if raw is None:
-        # Reroll: derive from run.id + monotonic time so each click bumps it
-        seed = derive_seed(run.id, salt=int(_time.time() * 1000))
+        # Reroll: μs-precision timestamp XOR'd with current seed so two clicks
+        # in the same millisecond still produce different seeds. Without the
+        # XOR a fast double-click could compute the same `salt` → same seed
+        # → reroll silently no-ops.
+        salt = int(_time.time() * 1_000_000) ^ (run.rewrite_seed or 0)
+        seed = derive_seed(run.id, salt=salt)
     else:
         try:
             seed = int(raw)

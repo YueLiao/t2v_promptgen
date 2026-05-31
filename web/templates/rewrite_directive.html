@@ -246,6 +246,7 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
     previewBusy: false,
     previewError: '',
     _previewTimer: null,
+    _previewReqId: 0,    // monotonic; stale responses ignored
 
     isSelected(cardId) {
       return this.selectedTransforms.some(t => t.id === cardId);
@@ -371,20 +372,29 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
     hasMultiCards() {
       // Show preview only when at least one selected card has a multi_enum
       // param with 2+ effective targets (excluding the single-pick case).
+      // Mirrors phases/rewrite_assign._resolve_targets exactly — including
+      // the fallback "all unknown selections → use full options list".
       for (const t of this.selectedTransforms) {
         const spec = paramSpecsByCard[t.id];
         if (!spec) continue;
         for (const [key, ps] of Object.entries(spec.params)) {
           if (ps.type !== 'multi_enum') continue;
           const raw = t.params && t.params[key];
-          // Use the same resolution as the backend
+          const opts = ps.options || [];
           let targets;
           if (Array.isArray(raw)) {
-            targets = (raw.length === 0 || raw.includes('__all__')) ? (ps.options || []) : raw.filter(x => (ps.options || []).includes(x));
+            if (raw.length === 0 || raw.includes('__all__')) {
+              targets = opts;
+            } else {
+              targets = raw.filter(x => opts.includes(x));
+              // Server fallback: all unknown → use full options list. UI
+              // must agree or the preview panel hides while server spreads.
+              if (targets.length === 0) targets = opts;
+            }
           } else if (typeof raw === 'string') {
             targets = [raw];
           } else {
-            targets = ps.options || [];
+            targets = opts;
           }
           if (targets.length >= 2) return true;
         }
@@ -406,6 +416,9 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
         this.previewCards = [];
         return;
       }
+      // Monotonic id: only the latest request is allowed to update state.
+      // Stale responses (slow network on an earlier change) are discarded.
+      const myId = ++this._previewReqId;
       this.previewLoading = true;
       this.previewError = '';
       try {
@@ -418,6 +431,7 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
           }),
         });
         const d = await r.json();
+        if (myId !== this._previewReqId) return;    // a newer request started
         if (!r.ok || !d.ok) {
           this.previewError = d.message || ('HTTP ' + r.status);
           return;
@@ -442,9 +456,9 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
         }
         this.previewCards = cards;
       } catch (e) {
-        this.previewError = String(e);
+        if (myId === this._previewReqId) this.previewError = String(e);
       } finally {
-        this.previewLoading = false;
+        if (myId === this._previewReqId) this.previewLoading = false;
       }
     },
     init() {

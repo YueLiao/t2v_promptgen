@@ -87,6 +87,11 @@ def rewrite_run(
         directive=run.rewrite_directive,
         seed=seed,
     )
+    # Telemetry: anchor any later "preview lied" debug — pool may have
+    # changed between preview render and actual rewrite kick-off.
+    print(f"[rewrite-assign] run={run.id} seed={seed} pool={total} "
+          f"cards_assigned={sum(1 for a in assignments.values() if a)}",
+          flush=True)
 
     done = 0
     for start in range(0, total, batch_size):

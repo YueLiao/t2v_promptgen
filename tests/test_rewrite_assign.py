@@ -238,3 +238,97 @@ def test_derive_seed_different_for_different_runs():
 def test_derive_seed_salt_changes_value():
     """The 🎲 reroll button bumps salt to get a new spread."""
     assert derive_seed("abc", salt=0) != derive_seed("abc", salt=1)
+
+
+# ---------------------------------------------------------------------------
+# Review-round regressions
+# ---------------------------------------------------------------------------
+
+def test_iterate_rewrite_uses_pre_assign_on_subset():
+    """iterate_rewrite calls rewrite_run with a scoped directive
+    (selected_source_ids = rejected). rewrite_run then calls pre_assign
+    only over that subset, NOT over the full pool. We verify by mocking
+    rewrite_prompts_real and inspecting the assignments kwarg it receives.
+
+    Catches a future regression where someone refactors pre_assign to
+    use the full pool even during iterate.
+    """
+    from datetime import datetime
+    from unittest.mock import patch
+    from t2v_promptgen.core.rewrite_schema import SourcePrompt
+    from t2v_promptgen.core.schema import Run, Phase
+    from t2v_promptgen.phases.rewrite import iterate_rewrite
+
+    # Build a rewrite run with 6 source prompts
+    now = datetime.now()
+    run = Run(
+        id="iter1", capability_slug="custom_rewrite",
+        capability_display_name="测试改写",
+        created_at=now, updated_at=now,
+        phase=Phase.P4_REVIEW, source="rewrite",
+        rewrite_seed=99,
+    )
+    run.source_prompts = [
+        SourcePrompt(source_id=f"s{i}", original_text=f"原 {i}",
+                      selected=True, failed_to_rewrite=False)
+        for i in range(6)
+    ]
+    run.rewrite_directive = _scene_directive(["E1 室外自然", "E5 室内现代"])
+
+    captured = {}
+    def fake_rewrite(source_prompts, directive, client, temperature=0.4,
+                     assignments=None):
+        captured["sids"] = [sp.source_id for sp in source_prompts]
+        captured["assignments"] = assignments
+        return [], []   # no entries returned — keep test focused
+
+    with patch("t2v_promptgen.web.llm_phases.rewrite_prompts_real",
+                side_effect=fake_rewrite):
+        iterate_rewrite(run, ["s1", "s3", "s5"], "", client=object())
+
+    # Should have been called with only the 3 rejected ids
+    assert set(captured["sids"]) == {"s1", "s3", "s5"}
+    # And assignments dict should only cover those 3 sids
+    assert set(captured["assignments"].keys()) == {"s1", "s3", "s5"}
+    # Each has a target_scene from the [E1, E5] subset
+    for sid in ("s1", "s3", "s5"):
+        a = captured["assignments"][sid]
+        assert a["scene_shift"]["target_scene"] in ("E1 室外自然", "E5 室内现代")
+
+
+def test_summarize_assignments_targets_sorted_lex():
+    """Display ordering: bucket keys appear in lexicographic target order.
+    Locks the contract so a future dict-ordering refactor surfaces here."""
+    fake = {
+        "s1": {"c": {"k": "Z 第三"}},
+        "s2": {"c": {"k": "A 第一"}},
+        "s3": {"c": {"k": "M 第二"}},
+    }
+    summary = summarize_assignments(fake)
+    keys = list(summary["c"]["k"].keys())
+    assert keys == sorted(keys)
+    assert keys[0] == "A 第一"
+
+
+def test_run_rewrite_seed_persists_through_jsondump():
+    """Pydantic round-trip preserves the new rewrite_seed field, so old
+    DB rows (where seed is missing) load as None — and explicitly-set
+    seeds survive save/load."""
+    from datetime import datetime
+    from t2v_promptgen.core.schema import Run, Phase
+    r1 = Run(
+        id="seedtest1", capability_slug="x",
+        created_at=datetime.now(), updated_at=datetime.now(),
+        phase=Phase.P1_DIMENSIONS,
+        rewrite_seed=12345,
+    )
+    j = r1.model_dump_json()
+    r2 = Run.model_validate_json(j)
+    assert r2.rewrite_seed == 12345
+
+    # Missing field path: simulate an older DB row by stripping the key
+    import json
+    d = json.loads(j)
+    d.pop("rewrite_seed", None)
+    r3 = Run.model_validate_json(json.dumps(d))
+    assert r3.rewrite_seed is None
