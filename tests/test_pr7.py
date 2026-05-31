@@ -85,13 +85,15 @@ def test_budget_blocks_over_limit():
     run = _run()
     run.cost_usd_limit = 0.0001    # tiny limit
     run.cost_usd_used = 0.0
-    bc = BudgetedClient(_StubClient(), run=run)
+    stub = _StubClient()
+    bc = BudgetedClient(stub, run=run)
     with pytest.raises(BudgetExceededError):
         bc.generate(
             messages=[{"role": "user", "content": "x" * 10000}],
             max_tokens=8000,
         )
-    assert _StubClient().calls == 0  # never called
+    # The inner client must not have been invoked (pre-flight cap)
+    assert stub.calls == 0
 
 
 def test_budget_accumulates_across_calls():
@@ -399,6 +401,61 @@ def test_coverage_d4_prefers_longer_token():
     total = sum(v.hit_count for v in d4.values)
     # Exactly one D4 attribution for one camera move
     assert total == 1
+
+
+def test_wrap_budget_returns_unwrapped_when_run_missing():
+    """Verify the regression: _wrap_budget MUST find the run in RUNS to apply
+    the cap. If RUNS doesn't have run_id, we get the raw client back (no cap)
+    — therefore create_run must register the run in RUNS BEFORE the first LLM
+    call, not after. This is a structural test that documents the contract."""
+    from t2v_promptgen.web.app import _wrap_budget, RUNS
+    from t2v_promptgen.llm.budget import BudgetedClient
+    stub = _StubClient()
+    # When run is unregistered: bypass (caller bug)
+    assert _wrap_budget(stub, "unknown-id-xyz") is stub
+    # When run IS registered: wrapped
+    run = _run("regtest1")
+    RUNS["regtest1"] = run
+    try:
+        wrapped = _wrap_budget(stub, "regtest1")
+        assert isinstance(wrapped, BudgetedClient)
+        assert wrapped.inner is stub
+    finally:
+        RUNS.pop("regtest1", None)
+
+
+def test_clone_preserves_budget_limit_resets_used():
+    """clone_run must carry cost_usd_limit and reset cost_usd_used to 0."""
+    # We test the Run field semantics directly (clone_run is an HTTP route)
+    from t2v_promptgen.core.schema import Run, Phase
+    src = _run("src1")
+    src.cost_usd_limit = 42.5
+    src.cost_usd_used = 17.3
+    # Mirror the clone construction in web/app.py
+    clone = Run(
+        id="clone1", capability_slug=src.capability_slug,
+        created_at=src.created_at, updated_at=src.updated_at,
+        phase=Phase.P1_DIMENSIONS,
+        cost_usd_limit=src.cost_usd_limit,
+        cost_usd_used=0.0,
+    )
+    assert clone.cost_usd_limit == 42.5
+    assert clone.cost_usd_used == 0.0
+
+
+def test_budget_release_lock_purges_entry():
+    """release_lock(run_id) must drop the per-run lock from _LOCKS."""
+    from t2v_promptgen.llm.budget import BudgetedClient
+    run = _run("locktest1")
+    bc = BudgetedClient(_StubClient(), run=run)
+    # Force a lock creation
+    bc.generate(messages=[{"role": "user", "content": "x"}])
+    assert "locktest1" in BudgetedClient._LOCKS
+    BudgetedClient.release_lock("locktest1")
+    assert "locktest1" not in BudgetedClient._LOCKS
+    # Idempotent
+    BudgetedClient.release_lock("locktest1")
+    BudgetedClient.release_lock("never-existed")
 
 
 def test_budget_concurrent_calls_use_lock():

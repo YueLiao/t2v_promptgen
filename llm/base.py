@@ -6,26 +6,36 @@ schema support (tool-use / function-calling style). One run = one provider
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
+@dataclass
 class Usage:
-    """Token usage + cost tracking returned by every generate() call."""
-    input_tokens: int
-    output_tokens: int
-    cost_usd: float
+    """Token usage + cost tracking returned by every generate() call.
+
+    Defaults to zero so accounting code can always read these attrs without
+    AttributeError when a provider forgets to set one.
+    """
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
 
 
+@dataclass
 class LLMResponse:
     """Container for one generate() call.
 
     If `json_schema` was supplied to generate(), `content` is a parsed dict
     matching the schema. Otherwise `content` is raw text.
+
+    All fields have safe defaults so callers can construct a partial response
+    in tests / error paths without juggling required-init args.
     """
-    content: dict | str
-    usage: Usage
-    finish_reason: str        # "stop" | "length" | "content_filter" | ...
-    raw: Any                  # provider-native response object, for debugging
+    content: dict | str = ""
+    usage: Usage = field(default_factory=Usage)
+    finish_reason: str = "stop"      # "stop" | "length" | "content_filter" | ...
+    raw: Any = None                  # provider-native response object, for debugging
 
 
 class LLMClient(Protocol):

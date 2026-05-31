@@ -103,18 +103,20 @@ class BudgetedClient(LLMClient):
                  each successful call — lets the caller persist run state.
 
     Thread safety: the read-modify-write of `run.cost_usd_used` is protected
-    by a per-run lock (keyed by `id(run)`), so concurrent background tasks
-    (judge + rewrite, etc.) on the same run can't lose updates.
+    by a per-run lock keyed by `run.id` (string), so concurrent background
+    tasks (judge + rewrite, etc.) on the same run can't lose updates.
+    Caller should invoke `release_lock(run_id)` when the run is permanently
+    deleted to drop the lock entry — otherwise the dict grows monotonically.
     """
 
-    # Per-run locks keyed by id(run). Long-lived; cleared when the run object
-    # is garbage-collected. Acceptable because Run objects are pinned in RUNS.
-    _LOCKS: dict[int, threading.Lock] = {}
+    # Per-run locks keyed by run.id (str). Stable across Run object identity
+    # so reloads from SQLite reuse the same lock for the same logical run.
+    _LOCKS: dict[str, threading.Lock] = {}
     _LOCKS_GUARD = threading.Lock()
 
     @classmethod
     def _lock_for(cls, run: Run) -> threading.Lock:
-        key = id(run)
+        key = run.id
         lk = cls._LOCKS.get(key)
         if lk is not None:
             return lk
@@ -124,6 +126,13 @@ class BudgetedClient(LLMClient):
                 lk = threading.Lock()
                 cls._LOCKS[key] = lk
         return lk
+
+    @classmethod
+    def release_lock(cls, run_id: str) -> None:
+        """Drop the per-run lock entry. Call this when a run is deleted so
+        the lock dict doesn't grow without bound."""
+        with cls._LOCKS_GUARD:
+            cls._LOCKS.pop(run_id, None)
 
     def __init__(self, inner: LLMClient, run: Run,
                  on_charge: Callable[[float], None] | None = None):

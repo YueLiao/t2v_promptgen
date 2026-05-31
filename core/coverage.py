@@ -137,7 +137,7 @@ _D4_LOOKUP: list[tuple[str, str]] = _build_d4_lookup()
 # one of these common non-camera bigrams. Only applies to 1-char tokens.
 _D4_FALSE_BIGRAM_NEXT = {
     "推": {"荐", "动", "出", "理", "测", "广", "进", "算", "翻", "辞", "崇"},
-    "拉": {"锯", "伸", "链", "拢", "萨", "丁", "拢"},
+    "拉": {"锯", "伸", "链", "拢", "萨", "丁"},
     "摇": {"晃", "头", "滚", "篮", "摆", "曳", "椅"},
     "跟": {"踪", "班", "头", "前", "屁", "脚"},   # 跟随 already a 2-char token
 }

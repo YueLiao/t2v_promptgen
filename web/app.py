@@ -408,6 +408,12 @@ def create_run(
             "base_url": base_url or None,
         }
 
+    # IMPORTANT: register the run in RUNS BEFORE the first LLM call so that
+    # _wrap_budget can find it and apply the cap on the very first call.
+    # If we registered later, _wrap_budget(run_id) → None → returns the raw
+    # client unwrapped and the cap is silently bypassed for P1 dimensions.
+    RUNS[run_id] = run
+
     # Try real LLM, fall back to mock — log loudly so silent failures are visible.
     # Exception: BudgetExceededError must surface, NOT fall back to mock (otherwise
     # the user gets fake data when they exceed their cap with no visible warning).
@@ -427,8 +433,8 @@ def create_run(
         msg = f"[预算已用满] {exc} —— 请提高 cost_usd_limit 或清零 cost_usd_used 后重试"
         print(msg, flush=True)
         RUN_LAST_ERROR[run_id] = msg
-        RUNS.pop(run_id, None)
-        RUN_CREDS.pop(run_id, None)
+        # Roll back ALL state created for this run (route is the only owner)
+        _cleanup_run_state(run_id)
         raise HTTPException(status_code=402, detail=msg)
     except Exception as exc:
         import traceback
@@ -452,7 +458,7 @@ def create_run(
         except ValueError:
             run.target_set_size = 60
 
-    RUNS[run_id] = run
+    # (RUNS[run_id] = run was set above before the first LLM call.)
 
     # P1 judge runs in background — don't block redirect (saves ~10-15s).
     # UI will show "评审中..." until result lands.
@@ -548,6 +554,7 @@ def goto_phase(run_id: str, target: str):
     # Special case: targeting P3 directly = re-run QA, then jump straight to P4
     # (P3 has no standalone UI — generating.html flashes by)
     if target_phase == Phase.P3_QA and run.prompts:
+        from ..llm.budget import BudgetExceededError
         run.phase = Phase.P3_QA
         try:
             report = _try_real_qa(run_id, run)
@@ -563,6 +570,10 @@ def goto_phase(run_id: str, target: str):
                 "sl2_uncovered": report.sl2_uncovered,
                 "judges_ran": report.judges_ran,
             }
+        except BudgetExceededError as exc:
+            RUN_QA_REPORTS[run_id] = {"error": str(exc), "judges_ran": False,
+                                        "budget_exceeded": True}
+            RUN_LAST_ERROR[run_id] = f"[预算已用满 → 跳回 P3 时 QA 跳过] {exc}"
         except Exception as e:
             RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
         run.phase = Phase.P4_REVIEW
@@ -1774,6 +1785,12 @@ def _cleanup_run_state(run_id: str) -> None:
               RUN_REWRITE_CANCEL, RUN_QA_REPORTS, RUN_DIM_CRITIQUE,
               RUN_LAST_ERROR, RUN_INTAKE):
         d.pop(run_id, None)
+    # Drop the per-run budget lock too (otherwise BudgetedClient._LOCKS grows)
+    try:
+        from ..llm.budget import BudgetedClient
+        BudgetedClient.release_lock(run_id)
+    except Exception:
+        pass
     # Wipe the DB row too
     try:
         from ..core.persistence import delete_run as _db_delete
@@ -1846,6 +1863,10 @@ def clone_run(run_id: str):
         provider=src.provider,
         model=src.model,
         source=src.source,
+        # Budget: carry the cap setting (user's choice should persist across
+        # clones), but reset usage to 0 — the clone has spent nothing yet.
+        cost_usd_limit=src.cost_usd_limit,
+        cost_usd_used=0.0,
         # rewrite-source fields: directive carries but file/prompts don't
         rewrite_directive=src.rewrite_directive.model_copy() if src.rewrite_directive else None,
         # NOT copied: prompts, source_file, source_prompts, rewrite_round,
