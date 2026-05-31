@@ -308,14 +308,24 @@ def cards_in_group(group: str) -> list[CardSpec]:
     return [c for c in ALL_CARDS if c.group == group]
 
 
-def _render_param_value(value, spec: ParamSpec) -> str:
+def _render_param_value(value, spec: ParamSpec, is_pre_assigned: bool = False) -> str:
     """Format one parameter for inclusion in the LLM prompt.
 
     Single value         → "[E1 室外自然]"
     Multi value [a,b,c]  → "在 [E1 / E5 / E8] 中**均匀随机**挑一个(每条 prompt 选不同的,整批要覆盖所有候选)"
     Multi value ["__all__"] / []  → expands to full options list with same wording.
+
+    If `is_pre_assigned` is True (the server has already picked a per-prompt
+    target for this param and embedded it in each prompt's `assigned` field),
+    we skip the long candidate list and just point the LLM at `assigned`.
+    Saves ~30-300 tokens per card per batch and removes the apparent conflict
+    between "pick one from list" and "use exactly this value".
     """
     if spec.type == "multi_enum":
+        # Pre-assigned multi_enum: each prompt has its own concrete target;
+        # the rendered text should defer to per-prompt assigned, not enumerate.
+        if is_pre_assigned:
+            return f"[按每条 prompt 的 assigned.{spec.key} 应用]"
         opts = spec.options or []
         # Normalize to list
         if isinstance(value, str):
@@ -341,16 +351,28 @@ def _render_param_value(value, spec: ParamSpec) -> str:
     return f"[{value}]"
 
 
-def render_card(card: CardSpec, params: dict) -> str:
+def render_card(
+    card: CardSpec,
+    params: dict,
+    pre_assigned_keys: set[str] | frozenset[str] | None = None,
+) -> str:
     """Render a card's prompt fragment with user-chosen params.
 
     Missing params fall back to defaults. Unknown keys are silently ignored.
     For multi_enum params the value can be a list — see `_render_param_value`.
+
+    `pre_assigned_keys` (optional) is the set of param keys on THIS card that
+    the server will provide per-prompt via the `assigned` dict in the LLM
+    payload. For those keys the rendered text is just a short "see assigned"
+    pointer instead of repeating the candidate list — saves tokens and
+    avoids the apparent conflict between "pick from list" and "use this
+    exact value".
     """
+    pre = pre_assigned_keys or frozenset()
     rendered: dict[str, str] = {}
     for ps in card.params:
         val = params.get(ps.key, ps.default)
-        rendered[ps.key] = _render_param_value(val, ps)
+        rendered[ps.key] = _render_param_value(val, ps, is_pre_assigned=ps.key in pre)
     return card.prompt_fragment.format(**rendered)
 
 

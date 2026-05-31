@@ -310,6 +310,79 @@ def test_summarize_assignments_targets_sorted_lex():
     assert keys[0] == "A 第一"
 
 
+def test_pre_assigned_keys_by_card_shape():
+    """Helper used by directive renderer to skip redundant candidate lists."""
+    from t2v_promptgen.phases.rewrite_assign import pre_assigned_keys_by_card
+
+    card_scene = card_for("scene_shift")
+    card_style = card_for("style_apply")
+    d = RewriteDirective(transforms=[
+        # multi with subset → counts as pre-assigned
+        Transform(id="scene_shift", name_zh=card_scene.name_zh,
+                  params={"target_scene": ["E1 室外自然", "E5 室内现代"],
+                          "preserve_action": "是"},
+                  order=0),
+        # multi pinned to ONE → does NOT count (no per-prompt spread needed)
+        Transform(id="style_apply", name_zh=card_style.name_zh,
+                  params={"target_style": ["Y1 写实电影"]},
+                  order=1),
+    ], free_text="—")
+    keys = pre_assigned_keys_by_card(d)
+    assert keys == {"scene_shift": {"target_scene"}}
+
+
+def test_render_card_skips_candidate_list_when_pre_assigned():
+    """When the server will per-prompt assign a multi_enum, the rendered
+    card fragment must NOT enumerate the candidate list — it should point
+    to assigned.<key>. Saves tokens + removes conflict with the LLM's
+    per-prompt `assigned` field."""
+    from t2v_promptgen.phases.rewrite_cards import render_card
+    spec = card_for("scene_shift")
+    text = render_card(spec, {
+        "target_scene": ["E1 室外自然", "E5 室内现代", "E8 奇幻虚拟"],
+        "preserve_action": "是",
+    }, pre_assigned_keys={"target_scene"})
+    # Should reference the per-prompt assigned field
+    assert "assigned.target_scene" in text
+    # Should NOT repeat the candidates
+    assert "E1 室外自然" not in text
+    assert "均匀随机" not in text
+    # Single-pick params on the same card are still inlined normally
+    assert "[是]" in text
+
+
+def test_render_card_keeps_candidate_list_when_not_pre_assigned():
+    """No pre_assigned_keys → old behavior: enumerate candidates."""
+    from t2v_promptgen.phases.rewrite_cards import render_card
+    spec = card_for("scene_shift")
+    text = render_card(spec, {
+        "target_scene": ["E1 室外自然", "E5 室内现代"],
+        "preserve_action": "是",
+    })
+    assert "E1 室外自然" in text
+    assert "均匀随机" in text
+    assert "assigned.target_scene" not in text
+
+
+def test_build_directive_text_uses_pre_assigned_pointer(monkeypatch):
+    """Integration: when rewrite_prompts_real has assignments, the
+    directive text sent to the LLM uses the short [按 assigned 应用]
+    pointer instead of the long candidate enumeration."""
+    from t2v_promptgen.web.llm_phases import _build_rewrite_directive_text
+    d = _scene_directive(["E1 室外自然", "E5 室内现代", "E8 奇幻虚拟"])
+    # Without pre_assigned: enumerates
+    plain = _build_rewrite_directive_text(d, pre_assigned=None)
+    assert "E1 室外自然" in plain
+    assert "均匀随机" in plain
+    # With pre_assigned: short pointer
+    short = _build_rewrite_directive_text(
+        d, pre_assigned={"scene_shift": {"target_scene"}}
+    )
+    assert "assigned.target_scene" in short
+    assert "E1 室外自然" not in short
+    assert "均匀随机" not in short
+
+
 def test_run_rewrite_seed_persists_through_jsondump():
     """Pydantic round-trip preserves the new rewrite_seed field, so old
     DB rows (where seed is missing) load as None — and explicitly-set

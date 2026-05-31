@@ -144,6 +144,33 @@ def summarize_assignments(
     }
 
 
+def pre_assigned_keys_by_card(
+    directive,
+) -> dict[str, set[str]]:
+    """Return {card_id: {param_key, ...}} of params that WILL be per-prompt
+    assigned (multi_enum with 2+ effective targets). Lets the renderer skip
+    repeating the candidate list for those keys.
+
+    Mirrors the eligibility logic in `pre_assign` but without source_ids /
+    seed — pure shape-only.
+    """
+    out: dict[str, set[str]] = {}
+    if not directive or not directive.transforms:
+        return out
+    for t in directive.transforms:
+        card = card_for(t.id)
+        if card is None:
+            continue
+        for spec in card.params:
+            if spec.type != "multi_enum":
+                continue
+            raw = (t.params or {}).get(spec.key, spec.default)
+            targets = _resolve_targets(raw, spec.options or [])
+            if len(targets) >= 2:
+                out.setdefault(card.id, set()).add(spec.key)
+    return out
+
+
 def derive_seed(run_id: str, salt: int = 0) -> int:
     """Stable default seed for a run when the user hasn't picked one yet.
     `salt` lets the UI's "🎲 reroll" bump it without dragging in a saved

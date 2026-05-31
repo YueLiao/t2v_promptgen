@@ -590,9 +590,17 @@ _REWRITE_SYSTEM = """你是 T2V 评测 prompt 改写专家。
 如果某条原 prompt 改写失败,在数组里**省略它**(不要塞错误占位)。我会按 source_id 知道哪条没回。"""
 
 
-def _build_rewrite_directive_text(directive) -> str:
-    """Render directive (transforms + free_text) into the LLM user message."""
+def _build_rewrite_directive_text(directive, pre_assigned: dict[str, set[str]] | None = None) -> str:
+    """Render directive (transforms + free_text) into the LLM user message.
+
+    `pre_assigned` maps {card_id: {param_key, ...}} for params that the
+    server has already per-prompt assigned (see phases.rewrite_assign).
+    When provided, the rendered card text replaces the long candidate-list
+    spread wording with a short "[按每条 prompt 的 assigned.X 应用]" pointer
+    — same semantics, fewer tokens, no apparent conflict with `assigned`.
+    """
     from ..phases.rewrite_cards import card_for, render_card
+    pre_assigned = pre_assigned or {}
     lines: list[str] = []
     if directive.transforms:
         lines.append("【应用以下卡片(依序生效)】")
@@ -600,7 +608,8 @@ def _build_rewrite_directive_text(directive) -> str:
             card = card_for(t.id)
             if card is None:
                 continue
-            fragment = render_card(card, t.params)
+            fragment = render_card(card, t.params,
+                                    pre_assigned_keys=pre_assigned.get(card.id))
             lines.append(f"  {t.order + 1}. [{card.name_zh}] {fragment}")
     if directive.free_text.strip():
         lines.append("\n【自由意图(补充)】")
@@ -630,8 +639,12 @@ def rewrite_prompts_real(
     if not source_prompts:
         return [], []
 
-    directive_text = _build_rewrite_directive_text(directive)
     assignments = assignments or {}
+    # Tell the directive renderer which params will be per-prompt assigned
+    # so it can skip repeating candidate lists for those cards.
+    from ..phases.rewrite_assign import pre_assigned_keys_by_card
+    pre_keys = pre_assigned_keys_by_card(directive) if assignments else {}
+    directive_text = _build_rewrite_directive_text(directive, pre_assigned=pre_keys)
     sp_payload = []
     for sp in source_prompts:
         item = {
