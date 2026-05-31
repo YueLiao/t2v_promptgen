@@ -122,6 +122,55 @@
     </div>
   </div>
 
+  <!-- Pre-assignment preview -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5"
+       x-show="hasMultiCards()" x-cloak>
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+      <div>
+        <h3 class="text-sm font-semibold text-slate-900">📐 预分摊预览</h3>
+        <p class="text-xs text-slate-500 mt-0.5">
+          按当前选择,服务端会把多目标卡片均匀分摊到每条 prompt(种子可复现)。
+          实际 LLM 调用前预先分配,LLM 只按 assigned 严格应用,不再"自己挑"。
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-slate-500 font-mono">seed=<span x-text="previewSeed || '...'"></span></span>
+        <button type="button" @click="rerollSeed()" :disabled="previewBusy"
+                class="text-xs bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 px-3 py-1 rounded-lg">
+          🎲 换一种分摊
+        </button>
+      </div>
+    </div>
+    <div x-show="previewLoading" x-cloak class="text-xs text-slate-400">计算中…</div>
+    <div x-show="previewError" x-cloak class="text-xs text-red-600" x-text="previewError"></div>
+    <div x-show="!previewLoading && previewCards.length === 0" x-cloak class="text-xs text-slate-400">
+      还没有需要分摊的多目标卡片
+    </div>
+    <div x-show="!previewLoading && previewCards.length > 0" x-cloak class="space-y-3">
+      <template x-for="card in previewCards" :key="card.id">
+        <div>
+          <div class="text-xs text-slate-700 font-medium mb-1">
+            <span x-text="card.name_zh"></span>
+            <span class="text-slate-400">·</span>
+            <span class="text-slate-500" x-text="card.param_label"></span>
+          </div>
+          <div class="flex flex-wrap gap-1">
+            <template x-for="bucket in card.buckets" :key="bucket.target">
+              <span class="text-xs px-2 py-0.5 rounded bg-orange-50 border border-orange-200 text-orange-800">
+                <span x-text="bucket.target"></span> ×
+                <span class="font-bold" x-text="bucket.count"></span>
+              </span>
+            </template>
+          </div>
+        </div>
+      </template>
+      <p class="text-xs text-slate-400 pt-2 border-t border-slate-100">
+        共 <span class="font-medium" x-text="previewTotal"></span> 条待改写 ·
+        每张多目标卡每个候选 ≈ <span x-text="Math.floor(previewTotal / Math.max(1, maxBuckets()))"></span>–<span x-text="Math.ceil(previewTotal / Math.max(1, maxBuckets()))"></span> 条
+      </p>
+    </div>
+  </div>
+
   <!-- Free text -->
   <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
     <h3 class="text-sm font-semibold text-slate-900 mb-2">自由意图(可选,和卡片叠加)</h3>
@@ -170,6 +219,17 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
       defaultsByCard[c.id] = {nameZh: c.name_zh, params};
     }
   }
+  // Build a quick lookup of param specs so the preview can resolve param.type
+  // and label without round-tripping to the server.
+  const paramSpecsByCard = {};
+  for (const g of (cardsUi?.groups || [])) {
+    for (const c of (g.cards || [])) {
+      paramSpecsByCard[c.id] = {
+        name_zh: c.name_zh,
+        params: Object.fromEntries((c.params || []).map(p => [p.key, p])),
+      };
+    }
+  }
   return {
     // P1-4: hydrate from server-side existing directive
     selectedTransforms: (initialTransforms || []).map(t => ({...t})),
@@ -177,6 +237,15 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
     saving: false,
     starting: false,
     error: '',
+
+    // Pre-assignment preview state
+    previewSeed: null,
+    previewTotal: 0,
+    previewCards: [],
+    previewLoading: false,
+    previewBusy: false,
+    previewError: '',
+    _previewTimer: null,
 
     isSelected(cardId) {
       return this.selectedTransforms.some(t => t.id === cardId);
@@ -198,10 +267,14 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
         this.selectedTransforms = this.selectedTransforms.filter(t => t.id !== cardId);
         this.selectedTransforms.forEach((t, i) => t.order = i);
       }
+      this._schedulePreview();
     },
     setParam(cardId, key, value) {
       const t = this.selectedTransforms.find(x => x.id === cardId);
-      if (t) t.params[key] = value;
+      if (t) {
+        t.params[key] = value;
+        this._schedulePreview();
+      }
     },
     getParam(cardId, key, fallback) {
       const t = this.selectedTransforms.find(x => x.id === cardId);
@@ -294,6 +367,104 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
       try { await this._saveDirective(); }
       finally { this.saving = false; }
     },
+    // --- preview helpers ---
+    hasMultiCards() {
+      // Show preview only when at least one selected card has a multi_enum
+      // param with 2+ effective targets (excluding the single-pick case).
+      for (const t of this.selectedTransforms) {
+        const spec = paramSpecsByCard[t.id];
+        if (!spec) continue;
+        for (const [key, ps] of Object.entries(spec.params)) {
+          if (ps.type !== 'multi_enum') continue;
+          const raw = t.params && t.params[key];
+          // Use the same resolution as the backend
+          let targets;
+          if (Array.isArray(raw)) {
+            targets = (raw.length === 0 || raw.includes('__all__')) ? (ps.options || []) : raw.filter(x => (ps.options || []).includes(x));
+          } else if (typeof raw === 'string') {
+            targets = [raw];
+          } else {
+            targets = ps.options || [];
+          }
+          if (targets.length >= 2) return true;
+        }
+      }
+      return false;
+    },
+    maxBuckets() {
+      let max = 1;
+      for (const c of this.previewCards) max = Math.max(max, c.buckets.length);
+      return max;
+    },
+    _schedulePreview() {
+      // Debounce: changes to chips fire many setParam calls per click
+      clearTimeout(this._previewTimer);
+      this._previewTimer = setTimeout(() => this._fetchPreview(), 200);
+    },
+    async _fetchPreview() {
+      if (!this.hasMultiCards()) {
+        this.previewCards = [];
+        return;
+      }
+      this.previewLoading = true;
+      this.previewError = '';
+      try {
+        const r = await fetch('/rewrite/{{ run.id }}/preview_assignment', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            transforms: this.selectedTransforms,
+            seed: this.previewSeed,
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) {
+          this.previewError = d.message || ('HTTP ' + r.status);
+          return;
+        }
+        this.previewSeed = d.seed;
+        this.previewTotal = d.total;
+        // Flatten per_card → preview cards list
+        const cards = [];
+        for (const [cid, params] of Object.entries(d.per_card || {})) {
+          const spec = paramSpecsByCard[cid];
+          for (const [key, counts] of Object.entries(params)) {
+            const paramSpec = spec?.params?.[key];
+            cards.push({
+              id: cid + ':' + key,
+              name_zh: spec?.name_zh || cid,
+              param_label: paramSpec?.label_zh || key,
+              buckets: Object.entries(counts)
+                .map(([target, count]) => ({target, count}))
+                .sort((a, b) => b.count - a.count || a.target.localeCompare(b.target)),
+            });
+          }
+        }
+        this.previewCards = cards;
+      } catch (e) {
+        this.previewError = String(e);
+      } finally {
+        this.previewLoading = false;
+      }
+    },
+    init() {
+      // Initial preview if there are already (hydrated) multi-target selections
+      if (this.hasMultiCards()) this._fetchPreview();
+    },
+    async rerollSeed() {
+      this.previewBusy = true;
+      try {
+        const r = await fetch('/rewrite/{{ run.id }}/seed', {method: 'POST',
+          headers: {'Content-Type': 'application/json'}, body: '{}'});
+        const d = await r.json();
+        if (d.ok) {
+          this.previewSeed = d.seed;
+          await this._fetchPreview();
+        }
+      } catch (e) { this.previewError = String(e); }
+      finally { this.previewBusy = false; }
+    },
+
     async startRewrite() {
       this.starting = true;
       try {

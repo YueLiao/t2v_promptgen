@@ -267,3 +267,125 @@ def test_progress_api_unknown_run_404(client):
     # Already exists above but keeping a marker to verify ordering didn't shift
     r = client.get("/api/runs/_unknown_/progress")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Pre-assignment preview + reroll seed endpoints
+# ---------------------------------------------------------------------------
+
+def _make_rewrite_run_with_sources(rid="ui_assign1", n=6):
+    """A minimal rewrite run with N source prompts ready for preview."""
+    from datetime import datetime
+    from t2v_promptgen.core.rewrite_schema import SourcePrompt
+    run = Run(
+        id=rid, capability_slug="custom_rewrite",
+        capability_display_name="改写已有 prompt",
+        created_at=datetime.now(), updated_at=datetime.now(),
+        phase=Phase.P2_PROMPTS, source="rewrite",
+        cost_usd_limit=5.0,
+    )
+    run.source_prompts = [
+        SourcePrompt(source_id=f"s{i}", original_text=f"原 prompt {i}",
+                      selected=True, failed_to_rewrite=False)
+        for i in range(n)
+    ]
+    RUNS[rid] = run
+    return run
+
+
+def test_preview_assignment_balanced(client):
+    run = _make_rewrite_run_with_sources("ui_pa1", n=9)
+    body = {
+        "transforms": [{
+            "id": "scene_shift",
+            "params": {"target_scene": ["E1 室外自然", "E5 室内现代", "E8 奇幻虚拟"],
+                       "preserve_action": "是"},
+            "order": 0,
+        }],
+        "seed": 42,
+    }
+    r = client.post(f"/rewrite/{run.id}/preview_assignment", json=body)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert d["seed"] == 42
+    assert d["total"] == 9
+    counts = d["per_card"]["scene_shift"]["target_scene"]
+    assert sum(counts.values()) == 9
+    # 9 / 3 = 3 exact each
+    assert all(c == 3 for c in counts.values())
+
+
+def test_preview_assignment_single_pick_no_buckets(client):
+    """Single-pick → no per-prompt assignment needed → per_card empty."""
+    run = _make_rewrite_run_with_sources("ui_pa2", n=5)
+    body = {"transforms": [{
+        "id": "scene_shift",
+        "params": {"target_scene": ["E1 室外自然"], "preserve_action": "是"},
+        "order": 0,
+    }]}
+    r = client.post(f"/rewrite/{run.id}/preview_assignment", json=body)
+    d = r.json()
+    assert d["per_card"] == {}    # nothing to spread
+
+
+def test_preview_assignment_rejects_non_rewrite(client):
+    """Generate-mode run can't use the rewrite preview endpoint."""
+    run = _make_run("ui_pa3", source="generate")
+    r = client.post(f"/runs/{run.id}/preview_assignment", json={})
+    assert r.status_code == 404 or r.status_code == 405    # route is /rewrite/...
+    r = client.post(f"/rewrite/{run.id}/preview_assignment", json={})
+    assert r.status_code == 400
+
+
+def test_preview_assignment_no_transforms_returns_empty(client):
+    run = _make_rewrite_run_with_sources("ui_pa4", n=3)
+    r = client.post(f"/rewrite/{run.id}/preview_assignment",
+                     json={"transforms": [], "seed": 1})
+    d = r.json()
+    assert d["ok"] is True
+    assert d["per_card"] == {}
+
+
+def test_seed_reroll_persists_new_seed(client):
+    run = _make_rewrite_run_with_sources("ui_pa5", n=3)
+    run.rewrite_seed = 100
+    r = client.post(f"/rewrite/{run.id}/seed", json={})
+    d = r.json()
+    assert d["ok"] is True
+    assert d["seed"] != 100    # must have changed
+    assert run.rewrite_seed == d["seed"]
+
+
+def test_seed_explicit_value_accepted(client):
+    run = _make_rewrite_run_with_sources("ui_pa6", n=3)
+    r = client.post(f"/rewrite/{run.id}/seed", json={"seed": 12345})
+    assert r.json()["seed"] == 12345
+    assert run.rewrite_seed == 12345
+
+
+def test_seed_rejects_garbage(client):
+    run = _make_rewrite_run_with_sources("ui_pa7", n=3)
+    r = client.post(f"/rewrite/{run.id}/seed", json={"seed": "abc"})
+    assert r.status_code == 400
+
+
+def test_preview_changes_with_different_seed(client):
+    """Same directive, different seed → same totals but different per-prompt
+    distribution (verified by checking seed echoes back)."""
+    run = _make_rewrite_run_with_sources("ui_pa8", n=6)
+    body = {"transforms": [{
+        "id": "scene_shift",
+        "params": {"target_scene": ["E1 室外自然", "E5 室内现代"],
+                   "preserve_action": "是"},
+        "order": 0,
+    }]}
+    r1 = client.post(f"/rewrite/{run.id}/preview_assignment",
+                      json={**body, "seed": 1}).json()
+    r2 = client.post(f"/rewrite/{run.id}/preview_assignment",
+                      json={**body, "seed": 2}).json()
+    assert r1["seed"] != r2["seed"]
+    # Totals still balanced
+    for r in (r1, r2):
+        c = r["per_card"]["scene_shift"]["target_scene"]
+        assert c == {"E1 室外自然": 3, "E5 室内现代": 3}

@@ -76,6 +76,18 @@ def rewrite_run(
     # Index for fast metadata lookup on commit
     sp_by_id = {p.source_id: p for p in run.source_prompts}
 
+    # Server-side pre-assignment: deterministically spread multi_enum targets
+    # across all pending source_ids so the LLM doesn't have to "pick" anymore.
+    # Computed ONCE over the full pool (not per-batch) so distribution stays
+    # balanced even when the batch boundary doesn't divide cleanly by m.
+    from .rewrite_assign import pre_assign, derive_seed
+    seed = run.rewrite_seed if run.rewrite_seed is not None else derive_seed(run.id)
+    assignments = pre_assign(
+        source_ids=[p.source_id for p in pending],
+        directive=run.rewrite_directive,
+        seed=seed,
+    )
+
     done = 0
     for start in range(0, total, batch_size):
         if cancel_flag and cancel_flag():
@@ -88,6 +100,7 @@ def rewrite_run(
                 source_prompts=batch,
                 directive=run.rewrite_directive,
                 client=client,
+                assignments=assignments,
             )
         except Exception as exc:
             # Whole-batch failure — mark them all and continue

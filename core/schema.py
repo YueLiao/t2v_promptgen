@@ -225,6 +225,10 @@ class Run(BaseModel):
         default=None,
         description="Human-readable zh name shown in UI; falls back to slug when None"
     )
+    # Rewrite multi-target spread seed. Server-side pre-assignment uses this
+    # so the user gets deterministic + reproducible distribution; "🎲 换一种
+    # 分摊" in the UI just bumps this. None = derive from run.id on first use.
+    rewrite_seed: int | None = Field(default=None)
     created_at: datetime
     updated_at: datetime
     phase: Phase

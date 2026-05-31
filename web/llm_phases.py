@@ -565,6 +565,12 @@ _REWRITE_SYSTEM = """你是 T2V 评测 prompt 改写专家。
 - subject_type 必填(human/animal/object/vehicle/natural_phenomenon/abstract_effect)
 - subject_count 必填(整数, 1/2/3+)
 
+【关于 assigned 字段(若存在)】
+每条 prompt 的输入对象可能带 "assigned" 字典 — 这是服务端为这条 prompt
+预先分配好的卡片参数(比如 {"scene_shift": {"target_scene": "E5 室内现代"}}),
+**必须严格按 assigned 应用**,不要换成别的值,也不要忽略。assigned 优先级
+高于卡片指令文本里出现的任何候选列表。
+
 输出严格 JSON,顶层 prompts 数组:
 {
   "prompts": [
@@ -609,8 +615,14 @@ def rewrite_prompts_real(
     directive,
     client: LLMClient,
     temperature: float = 0.4,
+    assignments: dict[str, dict[str, dict[str, str]]] | None = None,
 ) -> tuple[list[PromptEntry], list[str]]:
     """LLM-backed batch rewrite.
+
+    `assignments` is the output of `phases.rewrite_assign.pre_assign` —
+    for each source_id, a dict of {card_id: {param_key: chosen_target}}.
+    When provided, each source prompt's payload gets an `assigned` field
+    that the LLM is instructed to apply strictly.
 
     Returns (new_entries, failed_source_ids).
     New entries are not yet attached to a Run; caller is responsible.
@@ -619,15 +631,19 @@ def rewrite_prompts_real(
         return [], []
 
     directive_text = _build_rewrite_directive_text(directive)
-    sp_payload = [
-        {
+    assignments = assignments or {}
+    sp_payload = []
+    for sp in source_prompts:
+        item = {
             "source_id": sp.source_id,
             "original_zh": sp.original_text,
             "original_en": sp.original_text_en or "",
             "metadata": sp.metadata,
         }
-        for sp in source_prompts
-    ]
+        a = assignments.get(sp.source_id)
+        if a:
+            item["assigned"] = a
+        sp_payload.append(item)
     user_msg = (
         f"{directive_text}\n\n"
         f"【待改写 {len(source_prompts)} 条】\n"

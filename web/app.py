@@ -973,6 +973,111 @@ async def rewrite_directive_save(run_id: str, request: Request):
     return JSONResponse({"ok": True})
 
 
+@app.post("/rewrite/{run_id}/preview_assignment")
+async def rewrite_preview_assignment(run_id: str, request: Request):
+    """Server-side pre-assignment preview for the R2 page.
+
+    Body: {transforms: [{id, params, order}, ...], seed: int | null}
+    Returns: {seed, total, per_card: {card_id: {param_key: {target: count}}}}
+
+    Lets the user see exactly how scene_shift / style_apply / etc.
+    multi-value targets will be spread across their N prompts BEFORE
+    starting the (paid) rewrite. The same algorithm runs server-side at
+    rewrite time, so preview == real distribution given same seed.
+    """
+    from ..core.rewrite_schema import RewriteDirective, Transform
+    from ..phases.rewrite_assign import pre_assign, summarize_assignments, derive_seed
+    from ..phases.rewrite_cards import card_for
+
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "code": "BAD_JSON",
+                              "message": "请求体必须是 JSON"}, status_code=400)
+
+    # Build a transient directive — don't mutate the saved one
+    transforms = []
+    for t in body.get("transforms") or []:
+        card = card_for(t.get("id"))
+        if card is None:
+            continue
+        transforms.append(Transform(
+            id=t["id"], name_zh=card.name_zh,
+            params=t.get("params") or {},
+            order=int(t.get("order", 0)),
+        ))
+    try:
+        directive = RewriteDirective(transforms=transforms, free_text="—",
+                                       preserve_original=True)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "code": "BAD_DIRECTIVE",
+                              "message": str(exc)}, status_code=400)
+
+    # Determine the pool of source_ids that would actually be rewritten
+    selected = run.rewrite_directive.selected_source_ids if run.rewrite_directive else []
+    sel_set = set(selected) if selected else None
+    pending = [sp for sp in run.source_prompts
+                 if sp.selected and not sp.failed_to_rewrite
+                 and (sel_set is None or sp.source_id in sel_set)]
+    source_ids = [sp.source_id for sp in pending]
+
+    # Seed: body.seed → run.rewrite_seed → derived from run.id
+    seed_raw = body.get("seed")
+    if seed_raw is not None:
+        try:
+            seed = int(seed_raw)
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "code": "BAD_SEED",
+                                  "message": "seed 必须是整数"}, status_code=400)
+    elif run.rewrite_seed is not None:
+        seed = run.rewrite_seed
+    else:
+        seed = derive_seed(run.id)
+
+    assignments = pre_assign(source_ids, directive, seed)
+    per_card = summarize_assignments(assignments)
+    return JSONResponse({
+        "ok": True,
+        "seed": seed,
+        "total": len(source_ids),
+        "per_card": per_card,
+    })
+
+
+@app.post("/rewrite/{run_id}/seed")
+async def rewrite_seed_set(run_id: str, request: Request):
+    """Persist a new rewrite_seed on the run (used by '🎲 换一种分摊').
+
+    Body: {seed: int} — if omitted, derive a fresh one from current time.
+    """
+    from ..phases.rewrite_assign import derive_seed
+    import time as _time
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw = body.get("seed") if isinstance(body, dict) else None
+    if raw is None:
+        # Reroll: derive from run.id + monotonic time so each click bumps it
+        seed = derive_seed(run.id, salt=int(_time.time() * 1000))
+    else:
+        try:
+            seed = int(raw)
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "code": "BAD_SEED",
+                                  "message": "seed 必须是整数"}, status_code=400)
+    run.rewrite_seed = seed
+    run.updated_at = datetime.now()
+    return JSONResponse({"ok": True, "seed": seed})
+
+
 @app.post("/rewrite/{run_id}/start")
 def rewrite_start(run_id: str, background_tasks: BackgroundTasks):
     """R3: kick off async rewrite. Returns 303 to a 'generating' page."""
