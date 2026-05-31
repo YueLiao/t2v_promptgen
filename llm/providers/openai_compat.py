@@ -153,25 +153,29 @@ class OpenAICompatibleClient(LLMClient):
         if json_schema is not None:
             kwargs["response_format"] = {"type": "json_object"}
 
-        # Manual retry loop for additional safety on top of SDK retries
-        last_err = None
-        for attempt in range(3):
-            try:
-                resp = self._client.chat.completions.create(**kwargs)
-                break
-            except Exception as exc:                       # noqa: BLE001
-                last_err = exc
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-                else:
-                    raise
-        else:
-            raise last_err
+        # SDK already retries via max_retries; add light manual retry only
+        # for our own JSON parse failures (those wrap the body, not transport).
+        # Don't double-retry transport errors — the SDK already does that.
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            # Surface transport / API errors as-is with provider context
+            raise RuntimeError(
+                f"LLM call failed (model={self.model}, profile={self.profile}): "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+        # Defensive: empty choices is a real provider weirdness
+        if not getattr(resp, "choices", None):
+            raise RuntimeError(
+                f"LLM returned no choices (model={self.model}). "
+                f"Full response: {resp!r}"[:500]
+            )
 
         # Parse
         choice = resp.choices[0]
-        text = choice.message.content or ""
-        usage_obj = resp.usage
+        text = (choice.message.content or "") if hasattr(choice, "message") else ""
+        usage_obj = getattr(resp, "usage", None)
 
         content: dict | str
         if json_schema is not None:
@@ -207,9 +211,16 @@ class OpenAICompatibleClient(LLMClient):
 # ---------------------------------------------------------------------------
 
 def _parse_json_lenient(text: str) -> dict:
-    """Parse JSON from LLM output, tolerant of ```json fences and prose."""
-    text = text.strip()
-    # Strip fences
+    """Parse JSON from LLM output, tolerant of ```json fences and prose.
+
+    String-aware brace counter (handles `{"x": "}"}` correctly).
+    Empty input raises ValueError early.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Empty LLM response — cannot parse JSON")
+
+    # Strip ```json / ``` fences
     if text.startswith("```"):
         lines = text.splitlines()
         if lines[0].startswith("```"):
@@ -217,20 +228,37 @@ def _parse_json_lenient(text: str) -> dict:
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
-    # Try direct parse
+
+    # Try direct parse first
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # Locate first `{` and balanced `}`
+
+    # Locate first `{` and balanced `}`, ignoring braces inside strings
     start = text.find("{")
     if start < 0:
         raise ValueError(f"No JSON object found in response: {text[:200]}")
+
     depth = 0
+    in_string = False
+    escape = False
     for i in range(start, len(text)):
-        if text[i] == "{":
+        c = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            continue
+        if c == '"':
+            in_string = True
+            continue
+        if c == "{":
             depth += 1
-        elif text[i] == "}":
+        elif c == "}":
             depth -= 1
             if depth == 0:
                 try:

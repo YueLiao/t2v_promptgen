@@ -51,7 +51,14 @@ def classify_capability_llm(
 
     Returns dict with keys: slug, display_name_zh, scope, confidence, is_new,
     related_known, reasoning. On any LLM failure, raises — caller falls back.
+
+    Raises ValueError if description is empty/whitespace (defensive).
     """
+    if not (description or "").strip():
+        raise ValueError("description must be non-empty")
+    # Trim absurdly long descriptions to avoid blowing context
+    description = description.strip()[:4000]
+
     known_block = "\n".join(
         f"- {c.slug}: {c.display_name_zh} — {c.scope}"
         for c in KNOWN_CAPABILITIES
@@ -102,12 +109,26 @@ def classify_with_fallback(
     Always returns a dict with the same shape as classify_capability_llm.
     The fallback case is marked with confidence='low' and source='keyword'.
     """
+    # Defensive: empty description → custom_capability immediately,
+    # don't waste an LLM call.
+    if not (description or "").strip():
+        return {
+            "slug": "custom_capability",
+            "display_name_zh": "未指定能力",
+            "scope": "用户未提供描述",
+            "confidence": "low",
+            "is_new": True,
+            "related_known": [],
+            "reasoning": "description 为空",
+            "source": "empty",
+        }
+
     if client is not None:
         try:
             result = classify_capability_llm(description, client)
             result["source"] = "llm"
             return result
-        except Exception as exc:
+        except Exception:
             # Fall through to keyword
             pass
 

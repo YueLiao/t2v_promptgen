@@ -1451,15 +1451,29 @@ def p4_confirm(run_id: str):
 # Phase 5 — export / downloads
 # ---------------------------------------------------------------------------
 
+def _content_disposition(filename: str) -> str:
+    """Build a Content-Disposition header that handles non-ASCII filenames
+    via RFC 5987 (filename*= utf-8 encoding) plus an ASCII fallback.
+
+    Note: \\w in Python is Unicode-aware, so we use explicit ASCII class.
+    """
+    from urllib.parse import quote
+    # ASCII-only fallback filename (strict — strip dangerous header chars too)
+    ascii_name = re.sub(r"[^a-zA-Z0-9_\-.]", "_", filename) or "download"
+    return (
+        f'attachment; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
+
+
 @app.get("/runs/{run_id}/download/prompts.jsonl")
 async def download_prompts(run_id: str):
     run = _get_run(run_id)
-    lines = []
-    for p in run.prompts:
-        lines.append(p.model_dump_json())
+    lines = [p.model_dump_json() for p in run.prompts]
     body = "\n".join(lines)
+    name = f"prompts_{run.capability_slug}_v{run.inherited_from_version or 1}.jsonl"
     return Response(body, media_type="application/x-jsonlines",
-                    headers={"Content-Disposition": f"attachment; filename=prompts_{run.capability_slug}_v{run.inherited_from_version or 1}.jsonl"})
+                    headers={"Content-Disposition": _content_disposition(name)})
 
 
 @app.get("/runs/{run_id}/download/handbook.md")
@@ -1477,7 +1491,8 @@ async def download_handbook_md(run_id: str):
         md += "---\n\n"
     md += "## 评测员流程\n1. 看视频 A + 视频 B(同一 prompt)\n2. 对每个 SL2 维度勾选 A/B 是否触发\n3. GSB 总判定:A 比 B 好 / 相同 / 差\n"
     return Response(md, media_type="text/markdown; charset=utf-8",
-                    headers={"Content-Disposition": f"attachment; filename=handbook_{run.capability_slug}.md"})
+                    headers={"Content-Disposition":
+                             _content_disposition(f"handbook_{run.capability_slug}.md")})
 
 
 @app.get("/runs/{run_id}/download/handbook.json")
@@ -1500,7 +1515,7 @@ async def download_handbook_json(run_id: str):
         ],
     }
     return JSONResponse(data, headers={
-        "Content-Disposition": f"attachment; filename=handbook_{run.capability_slug}.json"
+        "Content-Disposition": _content_disposition(f"handbook_{run.capability_slug}.json")
     })
 
 
@@ -1514,6 +1529,13 @@ async def download_rewrite_diff(run_id: str):
     run = _get_run(run_id)
     if run.source != "rewrite":
         raise HTTPException(400, "Diff report only available for rewrite runs")
+    if not run.prompts:
+        # Return empty file rather than 500
+        return Response(
+            "", media_type="application/x-jsonlines",
+            headers={"Content-Disposition":
+                     _content_disposition(f"rewrite_diff_{run.id}_empty.jsonl")},
+        )
 
     # Build {source_id: SourcePrompt} for quick lookup
     sp_by_id = {sp.source_id: sp for sp in run.source_prompts}
@@ -1558,14 +1580,18 @@ async def download_rewrite_diff(run_id: str):
         body,
         media_type="application/x-jsonlines",
         headers={"Content-Disposition":
-                 f"attachment; filename=rewrite_diff_{run.id}.jsonl"},
+                 _content_disposition(f"rewrite_diff_{run.id}.jsonl")},
     )
 
 
 @app.get("/runs/{run_id}/download/coverage.json")
 async def download_coverage(run_id: str):
     run = _get_run(run_id)
-    return JSONResponse(mock_data.compute_coverage_matrix(run.prompts, run.sl2_list, run.axes))
+    return JSONResponse(
+        mock_data.compute_coverage_matrix(run.prompts, run.sl2_list, run.axes),
+        headers={"Content-Disposition":
+                 _content_disposition(f"coverage_{run.capability_slug}.json")},
+    )
 
 
 # ---------------------------------------------------------------------------
