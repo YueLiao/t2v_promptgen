@@ -1680,6 +1680,39 @@ def _cleanup_run_state(run_id: str) -> None:
         print(f"[persistence] delete_run({run_id}) failed: {exc}", flush=True)
 
 
+@app.get("/compare", response_class=HTMLResponse)
+def compare_runs_page(request: Request, a: str = "", b: str = ""):
+    """Side-by-side run diff page. Both ?a= and ?b= must point at known runs."""
+    from ..core.run_compare import compare_runs
+
+    if not a or not b:
+        return templates.TemplateResponse(request, "compare.html", {
+            "error": "请在 URL 提供 ?a=<run_id>&b=<run_id>",
+            "runs": sorted(RUNS.values(), key=lambda r: r.updated_at, reverse=True),
+        })
+    run_a = RUNS.get(a)
+    run_b = RUNS.get(b)
+    if not run_a:
+        return templates.TemplateResponse(request, "compare.html", {
+            "error": f"run a={a!r} 不存在",
+        })
+    if not run_b:
+        return templates.TemplateResponse(request, "compare.html", {
+            "error": f"run b={b!r} 不存在",
+        })
+    if a == b:
+        return templates.TemplateResponse(request, "compare.html", {
+            "error": "A 和 B 不能是同一个 run",
+        })
+
+    report = compare_runs(run_a, run_b)
+    return templates.TemplateResponse(request, "compare.html", {
+        "a": run_a,
+        "b": run_b,
+        "report": report,
+    })
+
+
 @app.post("/runs/{run_id}/clone")
 def clone_run(run_id: str):
     """Clone a run's design (SL2 + axes + tags + config) into a fresh run

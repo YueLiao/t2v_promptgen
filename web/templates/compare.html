@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}Run 对比 ｜ t2v_promptgen{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="max-w-3xl mx-auto bg-amber-50 border border-amber-300 rounded-lg p-5 mt-6">
+  <h2 class="text-lg font-bold text-amber-900 mb-2">无法对比</h2>
+  <p class="text-sm text-amber-800">{{ error }}</p>
+  <p class="text-xs text-slate-500 mt-3">回到 <a href="/" class="underline">首页</a> 在运行列表勾选两个任务,然后点"对比"按钮。</p>
+</div>
+{% else %}
+
+<div class="space-y-5">
+
+  <!-- Header -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <div class="text-xs text-slate-500">A</div>
+        <div class="text-lg font-bold text-slate-900">
+          <a href="/runs/{{ a.id }}" class="hover:underline">{{ a.capability_slug }}</a>
+          <code class="ml-2 text-xs bg-slate-100 px-1.5 py-0.5 rounded">{{ a.id }}</code>
+        </div>
+        <div class="text-xs text-slate-500 mt-1">{{ a.source }} · {{ a.updated_at.strftime("%Y-%m-%d %H:%M") }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500">B</div>
+        <div class="text-lg font-bold text-slate-900">
+          <a href="/runs/{{ b.id }}" class="hover:underline">{{ b.capability_slug }}</a>
+          <code class="ml-2 text-xs bg-slate-100 px-1.5 py-0.5 rounded">{{ b.id }}</code>
+        </div>
+        <div class="text-xs text-slate-500 mt-1">{{ b.source }} · {{ b.updated_at.strftime("%Y-%m-%d %H:%M") }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Headline numbers -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-200">
+      <h3 class="text-sm font-bold text-slate-900">总览</h3>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-xs text-slate-600">
+          <tr>
+            <th class="px-4 py-2 text-left">指标</th>
+            <th class="px-4 py-2 text-left">A</th>
+            <th class="px-4 py-2 text-left">B</th>
+            <th class="px-4 py-2 text-left">Δ</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          {% for h in report.headlines %}
+          <tr>
+            <td class="px-4 py-2 text-slate-700">{{ h.label }}</td>
+            <td class="px-4 py-2 font-mono text-xs">{{ h.a }}</td>
+            <td class="px-4 py-2 font-mono text-xs">{{ h.b }}</td>
+            <td class="px-4 py-2 font-mono text-xs
+              {% if h.flag == 'warn' %}text-red-700 font-bold
+              {% elif h.flag == 'good' %}text-green-700 font-bold
+              {% else %}text-slate-500{% endif %}">
+              {{ h.delta }}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- SL2 + axes diffs -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200">
+      <div class="px-5 py-3 border-b border-slate-200">
+        <h3 class="text-sm font-bold text-slate-900">SL2 检查项差异</h3>
+      </div>
+      <div class="p-5 text-xs space-y-2">
+        <div>
+          <span class="text-slate-500">共有({{ report.sl2_diff.common|length }}):</span>
+          <span class="text-slate-700">{{ report.sl2_diff.common|join(", ") or "—" }}</span>
+        </div>
+        <div>
+          <span class="text-red-600">仅 A 有({{ report.sl2_diff.only_a|length }}):</span>
+          <span class="text-slate-700">{{ report.sl2_diff.only_a|join(", ") or "—" }}</span>
+        </div>
+        <div>
+          <span class="text-green-600">仅 B 有({{ report.sl2_diff.only_b|length }}):</span>
+          <span class="text-slate-700">{{ report.sl2_diff.only_b|join(", ") or "—" }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200">
+      <div class="px-5 py-3 border-b border-slate-200">
+        <h3 class="text-sm font-bold text-slate-900">测试变量差异</h3>
+      </div>
+      <div class="p-5 text-xs space-y-2">
+        <div>
+          <span class="text-slate-500">共有({{ report.axes_diff.common|length }}):</span>
+          <span class="text-slate-700">{{ report.axes_diff.common|join(", ") or "—" }}</span>
+        </div>
+        <div>
+          <span class="text-red-600">仅 A 有({{ report.axes_diff.only_a|length }}):</span>
+          <span class="text-slate-700">{{ report.axes_diff.only_a|join(", ") or "—" }}</span>
+        </div>
+        <div>
+          <span class="text-green-600">仅 B 有({{ report.axes_diff.only_b|length }}):</span>
+          <span class="text-slate-700">{{ report.axes_diff.only_b|join(", ") or "—" }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 8-dim tag diff -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-200">
+      <h3 class="text-sm font-bold text-slate-900">8 维标签差异</h3>
+    </div>
+    <table class="w-full text-xs">
+      <thead class="bg-slate-50">
+        <tr>
+          <th class="px-4 py-2 text-left text-slate-600">维度</th>
+          <th class="px-4 py-2 text-left text-slate-600">共有</th>
+          <th class="px-4 py-2 text-left text-red-600">仅 A</th>
+          <th class="px-4 py-2 text-left text-green-600">仅 B</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {% for d in report.tag_diff %}
+        <tr>
+          <td class="px-4 py-2 font-mono text-slate-800">{{ d.dim }}</td>
+          <td class="px-4 py-2 text-slate-600">{{ d.common|join(", ") or "—" }}</td>
+          <td class="px-4 py-2 text-slate-600">{{ d.only_a|join(", ") or "—" }}</td>
+          <td class="px-4 py-2 text-slate-600">{{ d.only_b|join(", ") or "—" }}</td>
+        </tr>
+        {% endfor %}
+        {% if not report.tag_diff %}
+        <tr><td colspan="4" class="px-4 py-3 text-center text-slate-400">两个 run 都没有 8 维标签</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Prompt pool diff -->
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden"
+       x-data="{ tab: 'exact' }">
+    <div class="px-5 py-3 border-b border-slate-200">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold text-slate-900">Prompt 池差异</h3>
+        <div class="text-xs text-slate-500">
+          A 共 {{ report.prompt_diff.total_a }} · B 共 {{ report.prompt_diff.total_b }}
+        </div>
+      </div>
+    </div>
+
+    <div class="flex border-b border-slate-200">
+      <button @click="tab='exact'" type="button"
+              :class="tab==='exact' ? 'border-orange-500 text-orange-700' : 'border-transparent text-slate-500'"
+              class="px-4 py-2 text-xs font-medium border-b-2">
+        完全相同 ({{ report.prompt_diff.exact|length }})
+      </button>
+      <button @click="tab='near'" type="button"
+              :class="tab==='near' ? 'border-orange-500 text-orange-700' : 'border-transparent text-slate-500'"
+              class="px-4 py-2 text-xs font-medium border-b-2">
+        相似 ({{ report.prompt_diff.near|length }})
+      </button>
+      <button @click="tab='onlyA'" type="button"
+              :class="tab==='onlyA' ? 'border-orange-500 text-orange-700' : 'border-transparent text-slate-500'"
+              class="px-4 py-2 text-xs font-medium border-b-2">
+        仅 A ({{ report.prompt_diff.only_a|length }})
+      </button>
+      <button @click="tab='onlyB'" type="button"
+              :class="tab==='onlyB' ? 'border-orange-500 text-orange-700' : 'border-transparent text-slate-500'"
+              class="px-4 py-2 text-xs font-medium border-b-2">
+        仅 B ({{ report.prompt_diff.only_b|length }})
+      </button>
+    </div>
+
+    <!-- exact + near tabs: pair view -->
+    <div x-show="tab==='exact'" class="divide-y divide-slate-100">
+      {% for m in report.prompt_diff.exact %}
+      <div class="px-5 py-3 text-sm grid grid-cols-2 gap-4">
+        <div class="text-slate-700"><span class="text-xs text-slate-400 mr-2">A·{{ m.a.id }}</span>{{ m.a.prompt_zh }}</div>
+        <div class="text-slate-700"><span class="text-xs text-slate-400 mr-2">B·{{ m.b.id }}</span>{{ m.b.prompt_zh }}</div>
+      </div>
+      {% else %}
+      <p class="px-5 py-4 text-center text-xs text-slate-400">无完全相同的 prompt</p>
+      {% endfor %}
+    </div>
+
+    <div x-show="tab==='near'" x-cloak class="divide-y divide-slate-100">
+      {% for m in report.prompt_diff.near %}
+      <div class="px-5 py-3 text-sm grid grid-cols-2 gap-4">
+        <div class="text-slate-700">
+          <span class="text-xs text-slate-400 mr-2">A·{{ m.a.id }}</span>{{ m.a.prompt_zh }}
+        </div>
+        <div class="text-slate-700">
+          <span class="text-xs text-slate-400 mr-2">B·{{ m.b.id }}</span>{{ m.b.prompt_zh }}
+          <span class="text-xs text-amber-600 ml-1">sim={{ "%.2f"|format(m.similarity) }}</span>
+        </div>
+      </div>
+      {% else %}
+      <p class="px-5 py-4 text-center text-xs text-slate-400">无相似 prompt</p>
+      {% endfor %}
+    </div>
+
+    <div x-show="tab==='onlyA'" x-cloak class="divide-y divide-slate-100">
+      {% for p in report.prompt_diff.only_a %}
+      <div class="px-5 py-3 text-sm">
+        <span class="text-xs text-slate-400 mr-2">A·{{ p.id }}</span>{{ p.prompt_zh }}
+      </div>
+      {% else %}
+      <p class="px-5 py-4 text-center text-xs text-slate-400">A 中无独有 prompt</p>
+      {% endfor %}
+    </div>
+
+    <div x-show="tab==='onlyB'" x-cloak class="divide-y divide-slate-100">
+      {% for p in report.prompt_diff.only_b %}
+      <div class="px-5 py-3 text-sm">
+        <span class="text-xs text-slate-400 mr-2">B·{{ p.id }}</span>{{ p.prompt_zh }}
+      </div>
+      {% else %}
+      <p class="px-5 py-4 text-center text-xs text-slate-400">B 中无独有 prompt</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="text-center">
+    <a href="/" class="text-sm text-slate-500 hover:text-slate-900">← 返回首页</a>
+  </div>
+</div>
+
+{% endif %}
+
+{% endblock %}

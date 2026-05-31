@@ -159,13 +159,28 @@
 
 <!-- Existing runs -->
 {% if runs %}
-<div class="mt-10 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-  <div class="px-6 py-4 border-b border-slate-200">
+<div class="mt-10 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden"
+     x-data="{ picked: [] }">
+  <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
     <h2 class="text-lg font-semibold text-slate-900">已创建任务</h2>
+    <!-- Compare button — shows only when exactly 2 picked -->
+    <div class="text-xs text-slate-500" x-show="picked.length > 0">
+      已选 <span class="font-bold" x-text="picked.length"></span> 个
+      <button type="button"
+              :disabled="picked.length !== 2"
+              @click="window.location.href = '/compare?a=' + picked[0] + '&b=' + picked[1]"
+              :class="picked.length === 2 ? 'bg-orange-500 hover:bg-orange-600 text-white' : 'bg-slate-100 text-slate-400 cursor-not-allowed'"
+              class="ml-2 px-3 py-1 rounded font-medium">
+        ⇄ 对比这两个
+      </button>
+      <button type="button" @click="picked = []"
+              class="ml-1 text-slate-500 hover:text-slate-800">清空</button>
+    </div>
   </div>
   <table class="w-full">
     <thead class="bg-slate-50 text-xs font-medium text-slate-500 uppercase tracking-wide">
       <tr>
+        <th class="px-3 py-3"></th>
         <th class="px-6 py-3 text-left">编号</th>
         <th class="px-6 py-3 text-left">能力</th>
         <th class="px-6 py-3 text-left">当前阶段</th>
@@ -176,7 +191,16 @@
     </thead>
     <tbody class="divide-y divide-slate-100">
       {% for r in runs %}
-      <tr class="hover:bg-slate-50">
+      <tr class="hover:bg-slate-50"
+          :class="picked.includes('{{ r.id }}') ? 'bg-orange-50' : ''">
+        <td class="px-3 py-3 text-center">
+          <input type="checkbox" value="{{ r.id }}"
+                 :checked="picked.includes('{{ r.id }}')"
+                 @change="$event.target.checked
+                          ? (picked.length < 2 ? picked.push('{{ r.id }}') : ($event.target.checked = false))
+                          : (picked = picked.filter(x => x !== '{{ r.id }}'))"
+                 class="cursor-pointer">
+        </td>
         <td class="px-6 py-3 text-sm font-mono">{{ r.id }}</td>
         <td class="px-6 py-3 text-sm font-medium text-slate-900">{{ r.capability_slug }}</td>
         <td class="px-6 py-3 text-sm">
