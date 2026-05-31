@@ -30,12 +30,29 @@
 </nav>
 
 {% if run is defined %}
-<div class="bg-white border-b border-slate-200">
+<div class="bg-white border-b border-slate-200"
+     {% if run %}x-data="{ raiseBudget() {
+       const cur = {{ run.cost_usd_limit or 0 }};
+       const ans = prompt('当前预算 $' + cur.toFixed(2) + ',输入新的上限 USD (0 = 不限额):', (cur + 10).toFixed(2));
+       if (ans === null) return;
+       const newLim = parseFloat(ans);
+       if (isNaN(newLim) || newLim < 0) { alert('数字不合法'); return; }
+       fetch('/runs/{{ run.id }}/budget', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({limit: newLim})})
+         .then(r => r.json()).then(d => { if (d.ok) window.location.reload(); else alert('失败: ' + (d.message||'')); });
+     } }"{% endif %}>
   <div class="max-w-7xl mx-auto px-6 py-4">
-    <div class="flex items-center justify-between mb-3">
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
       <div>
-        <h1 class="text-xl font-bold text-slate-900">{{ run.capability_slug }}</h1>
-        <p class="text-sm text-slate-500">任务编号: <code class="bg-slate-100 px-1 rounded">{{ run.id }}</code> · 创建于 {{ run.created_at.strftime("%Y-%m-%d %H:%M") }}</p>
+        <h1 class="text-xl font-bold text-slate-900">
+          {{ run.capability_display_name or run.capability_slug }}
+        </h1>
+        <p class="text-sm text-slate-500">
+          任务编号: <code class="bg-slate-100 px-1 rounded">{{ run.id }}</code>
+          · 创建于 {{ run.created_at.strftime("%Y-%m-%d %H:%M") }}
+          {% if run.capability_display_name %}
+          · <code class="text-xs text-slate-400">{{ run.capability_slug }}</code>
+          {% endif %}
+        </p>
       </div>
       <div class="text-sm text-slate-600 text-right">
         <div>
@@ -44,48 +61,62 @@
         </div>
         {% if run.cost_usd_limit %}
         {% set pct = (run.cost_usd_used / run.cost_usd_limit * 100) if run.cost_usd_limit else 0 %}
-        <div class="text-xs mt-0.5">
-          预算:
-          <span class="font-mono
-            {% if pct >= 90 %}text-red-600 font-bold
-            {% elif pct >= 70 %}text-amber-600
-            {% else %}text-slate-700{% endif %}">
-            ${{ "%.4f"|format(run.cost_usd_used) }} / ${{ "%.2f"|format(run.cost_usd_limit) }}
-            ({{ "%.0f"|format(pct) }}%)
+        <div class="text-xs mt-0.5 flex items-center justify-end gap-2">
+          <span>预算:
+            <span class="font-mono
+              {% if pct >= 90 %}text-red-600 font-bold
+              {% elif pct >= 70 %}text-amber-600
+              {% else %}text-slate-700{% endif %}">
+              ${{ "%.4f"|format(run.cost_usd_used) }} / ${{ "%.2f"|format(run.cost_usd_limit) }}
+              ({{ "%.0f"|format(pct) }}%)
+            </span>
           </span>
+          {% if pct >= 70 %}
+          <button type="button" @click="raiseBudget()"
+                  class="text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded">
+            + 加预算
+          </button>
+          {% endif %}
         </div>
         {% else %}
         <div class="text-xs mt-0.5 text-slate-500">
           已花费: <span class="font-mono text-slate-700">${{ "%.4f"|format(run.cost_usd_used) }}</span>
           <span class="text-slate-400 ml-1" title="预算上限为 0,表示不限额">(不限额)</span>
+          <button type="button" @click="raiseBudget()"
+                  class="text-xs text-slate-400 hover:text-slate-700 ml-1 underline">设上限</button>
         </div>
         {% endif %}
       </div>
     </div>
     <!-- Phase tracker (completed phases are clickable to go back) -->
-    <div class="flex items-center gap-2 mt-2">
+    <!-- Mobile: horizontal scroll instead of wrap, so 8 pills + arrows fit -->
+    <div class="flex items-center gap-2 mt-2 overflow-x-auto pb-1 -mx-1 px-1">
       {% for phase in phase_order %}
       {% set is_current = run.phase.value == phase.value %}
       {% set is_completed = phase_order.index(phase) < phase_order.index(run.phase) %}
-      <div class="flex items-center">
+      <div class="flex items-center flex-shrink-0">
         {% if is_completed %}
+        {% set _confirm_detail = "" %}
+        {% if phase.value == "P1_DIMENSIONS" and run.prompts %}{% set _confirm_detail = "现有 " ~ run.prompts|length ~ " 条用例 + 质检结果会全部清空。" %}
+        {% elif phase.value == "P2_PROMPTS" and run.prompts %}{% set _confirm_detail = "现有 " ~ run.prompts|length ~ " 条用例会重生成。" %}
+        {% endif %}
         <form method="POST" action="/runs/{{ run.id }}/goto/{{ phase.value }}" class="inline"
-              onsubmit="return confirm('返回 {{ phase_label[phase] }} 这一步?后面步骤的结果会被清空,需要重新跑。')">
+              onsubmit="return confirm('⚠ 回退到「{{ phase_label[phase] }}」会丢失后面步骤的工作。\n{{ _confirm_detail }}\n确认?')">
           <button type="submit"
-            class="phase-pill px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 hover:bg-green-200 hover:shadow cursor-pointer"
-            title="点击返回这一步(后面结果会清空)">
+            class="phase-pill px-3 py-1 rounded-full text-xs font-medium bg-slate-200 text-slate-700 hover:bg-amber-100 hover:text-amber-800 hover:shadow cursor-pointer border border-slate-300"
+            title="⚠ 回退到这一步,后面结果会清空(危险)">
             ↺ {{ phase_label[phase] }}
           </button>
         </form>
         {% else %}
-        <div class="phase-pill px-3 py-1 rounded-full text-xs font-medium
+        <div class="phase-pill px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap
           {% if is_current %}bg-orange-500 text-white shadow
           {% else %}bg-slate-100 text-slate-500{% endif %}">
           {{ phase_label[phase] }}
         </div>
         {% endif %}
         {% if not loop.last %}
-        <div class="w-6 h-px bg-slate-300 mx-1"></div>
+        <div class="w-6 h-px bg-slate-300 mx-1 flex-shrink-0"></div>
         {% endif %}
       </div>
       {% endfor %}

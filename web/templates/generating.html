@@ -5,7 +5,7 @@
 {% if run.source == 'rewrite' %}
 <!-- ============= REWRITE MODE: poll /rewrite/.../progress ============= -->
 <div class="max-w-2xl mx-auto bg-white rounded-xl shadow-sm border border-slate-200 p-10 text-center"
-     x-data="rewriteProgress()" x-init="poll()">
+     x-data="rewriteProgress()" x-init="poll(); pollBudget()">
   <div class="inline-block animate-spin h-12 w-12 border-4 border-orange-500 border-t-transparent rounded-full mb-5"
        :class="status === 'completed' ? 'animate-none border-green-500' : (status === 'failed' ? 'animate-none border-red-500' : '')"></div>
 
@@ -21,12 +21,26 @@
   <div class="my-4">
     <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
       <div class="h-3 bg-orange-500 transition-all"
+           :class="(budgetExceeded && status === 'failed') ? 'bg-red-500' : ''"
            :style="'width: ' + percent() + '%'"></div>
     </div>
     <p class="text-sm text-slate-600 mt-2">
       <span x-text="done"></span> / <span x-text="total"></span> 条
       (<span x-text="percent()"></span>%)
+      <span x-show="eta()" x-cloak class="text-slate-400 ml-2">· ETA <span x-text="eta()"></span></span>
     </p>
+  </div>
+
+  <!-- Cost live -->
+  <div class="my-3 text-xs text-slate-600 flex items-center justify-center gap-2">
+    <span>已花费:<span class="font-mono"
+                       :class="costPct >= 90 ? 'text-red-600 font-bold' : (costPct >= 70 ? 'text-amber-600' : 'text-slate-700')"
+                       x-text="'$' + (costUsed||0).toFixed(4)"></span></span>
+    <span x-show="costLimit > 0">/ <span class="font-mono" x-text="'$' + costLimit.toFixed(2)"></span>
+      (<span x-text="costPct.toFixed(0)"></span>%)</span>
+    <span x-show="costLimit === 0" class="text-slate-400">(不限额)</span>
+    <button x-show="costPct >= 70 && costLimit > 0" type="button" @click="raiseBudget()"
+            class="text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded">+ 加预算</button>
   </div>
 
   <!-- Result summary -->
@@ -35,6 +49,9 @@
     <div>成功:<span class="text-green-700 font-medium" x-text="result?.succeeded"></span> 条</div>
     <div x-show="result?.failed > 0">失败:<span class="text-amber-700 font-medium" x-text="result?.failed"></span> 条</div>
     <div x-show="result?.error" class="text-red-700" x-text="result?.error"></div>
+    <div x-show="result?.budget_exceeded" class="text-red-700 mt-2 p-2 bg-red-50 rounded">
+      ⚠ 预算已用满。可先「+ 加预算」再回审核页继续。
+    </div>
   </div>
 
   <!-- Actions -->
@@ -49,7 +66,6 @@
       去审核 →
     </a>
   </div>
-  <!-- P1-8: cancel wait note -->
   <p x-show="cancelling" x-cloak class="text-xs text-slate-500 mt-2">
     LLM 批次必须跑完才能停。如果想立即丢弃,关掉这个标签页就行,服务端任务会在跑完后自动归档。
   </p>
@@ -63,7 +79,20 @@ function rewriteProgress() {
     total: {{ run.source_prompts|length }},
     result: null,
     cancelling: false,
+    costUsed: 0,
+    costLimit: {{ run.cost_usd_limit }},
+    costPct: 0,
+    budgetExceeded: false,
+    startedAt: Date.now(),
     percent() { return this.total ? Math.round(100 * this.done / this.total) : 0; },
+    eta() {
+      if (this.done === 0 || this.status !== 'running') return '';
+      const elapsed = (Date.now() - this.startedAt) / 1000;
+      const perItem = elapsed / this.done;
+      const remaining = Math.round((this.total - this.done) * perItem);
+      if (remaining < 60) return remaining + 's';
+      return Math.floor(remaining / 60) + 'm ' + (remaining % 60) + 's';
+    },
     async poll() {
       while (true) {
         try {
@@ -73,8 +102,8 @@ function rewriteProgress() {
           this.done = data.done || 0;
           this.total = data.total || this.total;
           this.result = data.result || null;
+          this.budgetExceeded = (data.result && data.result.budget_exceeded) || false;
           if (this.status !== 'running' && this.status !== 'qa_running') {
-            // Brief pause then auto-redirect to review
             if (this.status === 'completed') {
               setTimeout(() => window.location.href = '/runs/{{ run.id }}', 1200);
             }
@@ -84,26 +113,125 @@ function rewriteProgress() {
         await new Promise(r => setTimeout(r, 2000));
       }
     },
+    async pollBudget() {
+      while (this.status === 'running' || this.status === 'qa_running') {
+        try {
+          const r = await fetch('/api/runs/{{ run.id }}/progress');
+          const d = await r.json();
+          this.costUsed = d.cost_usd_used || 0;
+          this.costLimit = d.cost_usd_limit || 0;
+          this.costPct = d.cost_pct || 0;
+        } catch (e) {}
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    },
     async cancel() {
       this.cancelling = true;
+      try { await fetch('/rewrite/{{ run.id }}/cancel', {method: 'POST'}); }
+      finally {}
+    },
+    async raiseBudget() {
+      const cur = this.costLimit;
+      const ans = prompt(`当前预算 $${cur.toFixed(2)},已用 $${this.costUsed.toFixed(4)} (${this.costPct.toFixed(0)}%)。\n输入新的上限 USD (0 = 不限额):`, (cur + 10).toFixed(2));
+      if (ans === null) return;
+      const newLim = parseFloat(ans);
+      if (isNaN(newLim) || newLim < 0) { alert('数字不合法'); return; }
       try {
-        await fetch('/rewrite/{{ run.id }}/cancel', {method: 'POST'});
-      } finally {
-        // poll loop will detect cancelled status
-      }
+        const r = await fetch('/runs/{{ run.id }}/budget', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({limit: newLim}),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) { alert('改预算失败: ' + (d.message || r.status)); return; }
+        this.costLimit = d.new_limit;
+        this.costPct = this.costLimit ? (this.costUsed / this.costLimit * 100) : 0;
+      } catch (e) { alert('改预算失败: ' + e); }
     },
   };
 }
 </script>
 
 {% else %}
-<!-- ============= GENERATE MODE: existing simple spinner ============= -->
-<div class="bg-white rounded-xl shadow-sm border border-slate-200 p-12 text-center">
-  <div class="inline-block animate-spin h-12 w-12 border-4 border-orange-500 border-t-transparent rounded-full mb-6"></div>
-  <h2 class="text-xl font-bold text-slate-900 mb-2">正在生成 {{ run.target_set_size }} 条测试用例</h2>
+<!-- ============= GENERATE MODE: live progress on cost + phase ============= -->
+<div class="max-w-2xl mx-auto bg-white rounded-xl shadow-sm border border-slate-200 p-10 text-center"
+     x-data="genProgress()" x-init="poll()">
+  <div class="inline-block animate-spin h-12 w-12 border-4 border-orange-500 border-t-transparent rounded-full mb-5"
+       :class="done ? 'animate-none border-green-500' : ''"></div>
+  <h2 class="text-xl font-bold text-slate-900 mb-2">
+    <span x-show="!done">正在生成 {{ run.target_set_size }} 条测试用例…</span>
+    <span x-show="done" x-cloak>生成完成 ✓</span>
+  </h2>
   <p class="text-sm text-slate-500">基于 {{ run.sl2_list|length }} 个检查项 × {{ run.axes|length }} 个测试变量</p>
-  <p class="text-xs text-slate-400 mt-4">马上跳到审核页…</p>
-  <meta http-equiv="refresh" content="1; url=/runs/{{ run.id }}">
+
+  <!-- Cost live -->
+  <div class="my-4 text-xs text-slate-600 flex items-center justify-center gap-2">
+    <span>已花费:<span class="font-mono"
+                       :class="costPct >= 90 ? 'text-red-600 font-bold' : (costPct >= 70 ? 'text-amber-600' : 'text-slate-700')"
+                       x-text="'$' + (costUsed||0).toFixed(4)"></span></span>
+    <span x-show="costLimit > 0">/ <span class="font-mono" x-text="'$' + costLimit.toFixed(2)"></span>
+      (<span x-text="costPct.toFixed(0)"></span>%)</span>
+    <span x-show="costLimit === 0" class="text-slate-400">(不限额)</span>
+    <button x-show="costPct >= 70 && costLimit > 0" type="button" @click="raiseBudget()"
+            class="text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded">+ 加预算</button>
+  </div>
+
+  <p class="text-xs text-slate-400 mt-3" x-text="phaseLabel"></p>
+  <p x-show="lastError" x-cloak class="text-xs text-red-600 mt-3 p-2 bg-red-50 rounded" x-text="lastError"></p>
 </div>
+
+<script>
+function genProgress() {
+  return {
+    done: false,
+    costUsed: 0,
+    costLimit: {{ run.cost_usd_limit }},
+    costPct: 0,
+    phaseLabel: '请稍候…',
+    lastError: '',
+    async poll() {
+      const PHASE_NAMES = {
+        'P0_INTAKE': '理解需求', 'P1_DIMENSIONS': '确定评测维度',
+        'P2_PROMPTS': '生成测试用例', 'P3_QA': '自动质检',
+        'P4_REVIEW': '审核确认', 'P5_EXPORT': '导出',
+      };
+      while (true) {
+        try {
+          const r = await fetch('/api/runs/{{ run.id }}/progress');
+          const d = await r.json();
+          this.costUsed = d.cost_usd_used || 0;
+          this.costLimit = d.cost_usd_limit || 0;
+          this.costPct = d.cost_pct || 0;
+          this.lastError = d.last_error || '';
+          this.phaseLabel = '阶段:' + (PHASE_NAMES[d.phase] || d.phase);
+          if (d.phase === 'P4_REVIEW' || d.phase === 'P5_EXPORT' || d.phase === 'DONE') {
+            this.done = true;
+            setTimeout(() => window.location.href = '/runs/{{ run.id }}', 800);
+            break;
+          }
+        } catch (e) {}
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    },
+    async raiseBudget() {
+      const cur = this.costLimit;
+      const ans = prompt(`当前预算 $${cur.toFixed(2)},已用 $${this.costUsed.toFixed(4)}。\n输入新的上限 USD (0 = 不限额):`, (cur + 10).toFixed(2));
+      if (ans === null) return;
+      const newLim = parseFloat(ans);
+      if (isNaN(newLim) || newLim < 0) { alert('数字不合法'); return; }
+      try {
+        const r = await fetch('/runs/{{ run.id }}/budget', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({limit: newLim}),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) { alert('改预算失败'); return; }
+        this.costLimit = d.new_limit;
+        this.costPct = this.costLimit ? (this.costUsed / this.costLimit * 100) : 0;
+      } catch (e) { alert(e); }
+    },
+  };
+}
+</script>
 {% endif %}
 {% endblock %}

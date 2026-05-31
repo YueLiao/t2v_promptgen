@@ -388,6 +388,7 @@ def create_run(
     run = Run(
         id=run_id,
         capability_slug=slug,
+        capability_display_name=intake.get("display_name_zh"),
         created_at=now,
         updated_at=now,
         phase=Phase.P1_DIMENSIONS,             # auto-skip P0 (intake is just slug extraction)
@@ -656,6 +657,7 @@ def rewrite_upload(
     model_p2: str = Form("deepseek-chat"),
     api_key: str = Form(""),
     base_url: str = Form(""),
+    cost_usd_limit: float = Form(5.0),
 ):
     """R0: parse uploaded prompt list, create a run, redirect to R1."""
     from ..parsers.prompt_loader import load_prompts
@@ -681,6 +683,7 @@ def rewrite_upload(
     run = Run(
         id=run_id,
         capability_slug="custom_rewrite",
+        capability_display_name="改写已有 prompt",
         created_at=now, updated_at=now,
         phase=Phase.P1_DIMENSIONS,        # R1 maps onto P1 slot internally
         user_description=f"[改写任务] {source_file.filename} ({source_file.row_count} 条)",
@@ -688,6 +691,7 @@ def rewrite_upload(
         model=f"{model_p1} / {model_p2}",
         source="rewrite",
         source_file=source_file,
+        cost_usd_limit=max(0.0, float(cost_usd_limit or 0)),
     )
     RUNS[run_id] = run
     RUN_RAW_ROWS[run_id] = rows
@@ -1246,6 +1250,51 @@ def rewrite_accept(run_id: str, prompt_id: str, decision: str = Form("accept")):
     return JSONResponse({"ok": True, "id": prompt_id, "decision": decision})
 
 
+@app.post("/rewrite/{run_id}/decide_bulk")
+async def rewrite_decide_bulk(run_id: str, request: Request):
+    """Batch set rewrite_accepted on many PromptEntries in one round-trip.
+
+    Body: {"decision": "accept"|"reject"|"unset", "ids": [pid, ...] | null}
+      - If ids is null/omitted: apply to ALL prompts in the run.
+      - If ids is empty list: no-op (returns {ok:true, updated:0}).
+
+    Used by review.html '全部接受 / 全部驳回' to avoid N sequential POSTs.
+    """
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "code": "BAD_JSON", "message": "请求体必须是 JSON"},
+            status_code=400,
+        )
+    decision = body.get("decision", "accept")
+    if decision not in ("accept", "reject", "unset"):
+        return JSONResponse(
+            {"ok": False, "code": "BAD_DECISION",
+             "message": "decision 必须是 accept/reject/unset"},
+            status_code=400,
+        )
+    target_value = {"accept": True, "reject": False, "unset": None}[decision]
+    ids = body.get("ids")
+    if ids is None:
+        targets = list(run.prompts)
+    else:
+        if not isinstance(ids, list):
+            return JSONResponse(
+                {"ok": False, "code": "BAD_IDS", "message": "ids 必须是数组或 null"},
+                status_code=400,
+            )
+        id_set = set(ids)
+        targets = [p for p in run.prompts if p.id in id_set]
+    for p in targets:
+        p.rewrite_accepted = target_value
+    run.updated_at = datetime.now()
+    return JSONResponse({"ok": True, "decision": decision, "updated": len(targets)})
+
+
 @app.post("/rewrite/{run_id}/iterate")
 async def rewrite_iterate(run_id: str, request: Request, background_tasks: BackgroundTasks):
     """R5 iteration: redo the rejected subset with appended refinement."""
@@ -1581,6 +1630,83 @@ async def p4_drop_prompt(run_id: str, prompt_id: str):
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
+@app.post("/runs/{run_id}/p4/drop_bulk")
+async def p4_drop_bulk(run_id: str, request: Request):
+    """Batch delete prompts. Body: {"ids": [pid, ...]}. Returns JSON."""
+    run = _get_run(run_id)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "code": "BAD_JSON", "message": "请求体必须是 JSON"},
+            status_code=400,
+        )
+    ids = body.get("ids") or []
+    if not isinstance(ids, list):
+        return JSONResponse(
+            {"ok": False, "code": "BAD_IDS", "message": "ids 必须是数组"},
+            status_code=400,
+        )
+    id_set = set(ids)
+    before = len(run.prompts)
+    run.prompts = [p for p in run.prompts if p.id not in id_set]
+    deleted = before - len(run.prompts)
+    run.updated_at = datetime.now()
+    return JSONResponse({"ok": True, "deleted": deleted, "remaining": len(run.prompts)})
+
+
+@app.post("/runs/{run_id}/budget")
+async def update_budget(run_id: str, request: Request):
+    """Update cost_usd_limit on a live run. Body: {"limit": float}.
+
+    Use case: user's run hit the cap mid-flight and they want to raise it
+    rather than start over. Set 0 to disable the cap.
+    """
+    run = _get_run(run_id)
+    try:
+        body = await request.json()
+        limit = float(body.get("limit", -1))
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "code": "BAD_JSON", "message": "limit 必须是 number"},
+            status_code=400,
+        )
+    if limit < 0:
+        return JSONResponse(
+            {"ok": False, "code": "NEGATIVE", "message": "limit 不能为负"},
+            status_code=400,
+        )
+    old = run.cost_usd_limit
+    run.cost_usd_limit = limit
+    run.updated_at = datetime.now()
+    return JSONResponse({"ok": True, "old_limit": old, "new_limit": limit,
+                          "used": run.cost_usd_used})
+
+
+@app.get("/api/runs/{run_id}/progress")
+async def api_run_progress(run_id: str):
+    """Live snapshot for the generating page poll.
+
+    Returns: phase, cost (used+limit+pct), rewrite progress (done/total),
+    last error message if any. Cheap — meant to be polled every 1-2 s.
+    """
+    run = _get_run(run_id)
+    rw = RUN_REWRITE_STATE.get(run_id) or {}
+    return JSONResponse({
+        "phase": run.phase.value,
+        "cost_usd_used": run.cost_usd_used,
+        "cost_usd_limit": run.cost_usd_limit,
+        "cost_pct": (run.cost_usd_used / run.cost_usd_limit * 100)
+                       if run.cost_usd_limit else 0,
+        "rewrite_status": rw.get("status"),
+        "rewrite_done": rw.get("done", 0),
+        "rewrite_total": rw.get("total", 0),
+        "rewrite_result": rw.get("result"),
+        "last_error": RUN_LAST_ERROR.get(run_id),
+        "prompts_count": len(run.prompts),
+    })
+
+
 @app.post("/runs/{run_id}/p4/regenerate")
 def p4_regenerate(run_id: str, free_text: str = Form("")):
     run = _get_run(run_id)
@@ -1849,6 +1975,7 @@ def clone_run(run_id: str):
     new_run = Run(
         id=new_id,
         capability_slug=src.capability_slug,
+        capability_display_name=src.capability_display_name,
         created_at=now,
         updated_at=now,
         phase=Phase.P1_DIMENSIONS,

@@ -1,0 +1,214 @@
+"""End-to-end smoke tests for the new UI-supporting endpoints
+added in the UI revamp round:
+  - /rewrite/{id}/decide_bulk         (bulk accept/reject)
+  - /runs/{id}/p4/drop_bulk           (bulk delete prompts)
+  - /runs/{id}/budget                  (raise / lower cost cap mid-run)
+  - /api/runs/{id}/progress            (poll for generating page)
+"""
+from datetime import datetime
+
+import pytest
+from fastapi.testclient import TestClient
+
+from t2v_promptgen.core.schema import Phase, PromptEntry, Run
+from t2v_promptgen.web.app import RUNS, app
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+def _make_run(rid="ui1", source="generate", n_prompts=3) -> Run:
+    now = datetime.now()
+    run = Run(
+        id=rid, capability_slug="test_cap",
+        capability_display_name="测试能力",
+        created_at=now, updated_at=now,
+        phase=Phase.P4_REVIEW,
+        source=source,
+        cost_usd_limit=5.0,
+        cost_usd_used=1.23,
+    )
+    for i in range(n_prompts):
+        run.prompts.append(PromptEntry(
+            id=f"rw_p{i}" if source == "rewrite" else f"p{i}",
+            source_id=f"src_{i}" if source == "rewrite" else None,
+            capability="test_cap", capability_version=1,
+            difficulty="medium", difficulty_score=5.0,
+            sl2_covered=[], axes_values={},
+            subject_count=1, action_count=1,
+            camera_zh=None, camera_en=None,
+            prompt_zh=f"中文 prompt {i}",
+            prompt_en=f"english prompt {i}",
+            generated_at=now,
+        ))
+    RUNS[rid] = run
+    return run
+
+
+def teardown_function():
+    for k in list(RUNS):
+        if k.startswith("ui"):
+            RUNS.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# Bulk accept/reject (rewrite mode)
+# ---------------------------------------------------------------------------
+
+def test_rewrite_decide_bulk_accept_all(client):
+    run = _make_run("ui_bulk1", source="rewrite", n_prompts=5)
+    r = client.post(f"/rewrite/{run.id}/decide_bulk", json={"decision": "accept"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["updated"] == 5
+    for p in run.prompts:
+        assert p.rewrite_accepted is True
+
+
+def test_rewrite_decide_bulk_only_subset(client):
+    run = _make_run("ui_bulk2", source="rewrite", n_prompts=5)
+    pick = [run.prompts[0].id, run.prompts[2].id]
+    r = client.post(f"/rewrite/{run.id}/decide_bulk",
+                     json={"decision": "reject", "ids": pick})
+    assert r.json()["updated"] == 2
+    assert run.prompts[0].rewrite_accepted is False
+    assert run.prompts[1].rewrite_accepted is None
+    assert run.prompts[2].rewrite_accepted is False
+
+
+def test_rewrite_decide_bulk_rejects_non_rewrite_run(client):
+    run = _make_run("ui_bulk3", source="generate", n_prompts=2)
+    r = client.post(f"/rewrite/{run.id}/decide_bulk", json={"decision": "accept"})
+    assert r.status_code == 400
+
+
+def test_rewrite_decide_bulk_bad_decision(client):
+    run = _make_run("ui_bulk4", source="rewrite", n_prompts=2)
+    r = client.post(f"/rewrite/{run.id}/decide_bulk", json={"decision": "garbage"})
+    assert r.status_code == 400
+    assert r.json()["code"] == "BAD_DECISION"
+
+
+def test_rewrite_decide_bulk_unset(client):
+    run = _make_run("ui_bulk5", source="rewrite", n_prompts=3)
+    for p in run.prompts:
+        p.rewrite_accepted = True
+    r = client.post(f"/rewrite/{run.id}/decide_bulk", json={"decision": "unset"})
+    assert r.status_code == 200
+    for p in run.prompts:
+        assert p.rewrite_accepted is None
+
+
+# ---------------------------------------------------------------------------
+# Bulk delete (generate mode)
+# ---------------------------------------------------------------------------
+
+def test_p4_drop_bulk_removes_selected(client):
+    run = _make_run("ui_drop1", source="generate", n_prompts=5)
+    pick = [run.prompts[1].id, run.prompts[3].id]
+    r = client.post(f"/runs/{run.id}/p4/drop_bulk", json={"ids": pick})
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 2
+    assert len(run.prompts) == 3
+    assert all(p.id not in pick for p in run.prompts)
+
+
+def test_p4_drop_bulk_empty_ids_is_noop(client):
+    run = _make_run("ui_drop2", source="generate", n_prompts=3)
+    r = client.post(f"/runs/{run.id}/p4/drop_bulk", json={"ids": []})
+    assert r.json()["deleted"] == 0
+    assert len(run.prompts) == 3
+
+
+def test_p4_drop_bulk_unknown_ids_silent(client):
+    run = _make_run("ui_drop3", source="generate", n_prompts=3)
+    r = client.post(f"/runs/{run.id}/p4/drop_bulk",
+                     json={"ids": ["nonexistent"]})
+    assert r.json()["deleted"] == 0
+    assert len(run.prompts) == 3
+
+
+def test_p4_drop_bulk_rejects_non_list(client):
+    run = _make_run("ui_drop4", source="generate", n_prompts=2)
+    r = client.post(f"/runs/{run.id}/p4/drop_bulk", json={"ids": "not-a-list"})
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Budget update
+# ---------------------------------------------------------------------------
+
+def test_update_budget_raises_limit(client):
+    run = _make_run("ui_b1")
+    assert run.cost_usd_limit == 5.0
+    r = client.post(f"/runs/{run.id}/budget", json={"limit": 25.0})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["new_limit"] == 25.0
+    assert body["old_limit"] == 5.0
+    assert run.cost_usd_limit == 25.0
+
+
+def test_update_budget_zero_disables_cap(client):
+    run = _make_run("ui_b2")
+    r = client.post(f"/runs/{run.id}/budget", json={"limit": 0})
+    assert r.status_code == 200
+    assert run.cost_usd_limit == 0.0
+
+
+def test_update_budget_rejects_negative(client):
+    run = _make_run("ui_b3")
+    r = client.post(f"/runs/{run.id}/budget", json={"limit": -1})
+    assert r.status_code == 400
+    assert r.json()["code"] == "NEGATIVE"
+    assert run.cost_usd_limit == 5.0    # unchanged
+
+
+def test_update_budget_bad_json(client):
+    run = _make_run("ui_b4")
+    r = client.post(f"/runs/{run.id}/budget", data="not json",
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Progress API
+# ---------------------------------------------------------------------------
+
+def test_progress_api_returns_cost_and_phase(client):
+    run = _make_run("ui_pr1")
+    r = client.get(f"/api/runs/{run.id}/progress")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "P4_REVIEW"
+    assert body["cost_usd_used"] == 1.23
+    assert body["cost_usd_limit"] == 5.0
+    assert abs(body["cost_pct"] - 24.6) < 0.1
+    assert body["prompts_count"] == 3
+
+
+def test_progress_api_unlimited_pct_zero(client):
+    run = _make_run("ui_pr2")
+    run.cost_usd_limit = 0
+    r = client.get(f"/api/runs/{run.id}/progress")
+    assert r.json()["cost_pct"] == 0
+
+
+def test_progress_api_unknown_run_404(client):
+    r = client.get("/api/runs/does_not_exist/progress")
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Run.capability_display_name carries through
+# ---------------------------------------------------------------------------
+
+def test_run_carries_display_name(client):
+    run = _make_run("ui_dn1")
+    assert run.capability_display_name == "测试能力"
+    # JSON-roundtrip preserves it
+    j = run.model_dump_json()
+    assert "测试能力" in j

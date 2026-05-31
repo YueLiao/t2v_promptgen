@@ -3,7 +3,7 @@
 
 {% block content %}
 <div class="space-y-6"
-     {% if run.source == 'rewrite' %}x-data="rewriteReview()"{% endif %}>
+     {% if run.source == 'rewrite' %}x-data="rewriteReview()"{% else %}x-data="generateReview()"{% endif %}>
 
   {# ============= REWRITE MODE — diff view + accept/reject =============== #}
   {% if run.source == 'rewrite' %}
@@ -36,14 +36,14 @@
         </div>
       </div>
       <div class="px-5 py-4">
-        <div class="text-xs text-slate-500">保持率均(≥5 算过)</div>
+        <div class="text-xs text-slate-500">原意保留度 均(≥5 算过)</div>
         <div class="text-2xl font-bold text-slate-800 mt-0.5">
           {% if qa_report.keep_avg is not none %}{{ qa_report.keep_avg }}{% else %}—{% endif %}
         </div>
         <div class="text-xs text-slate-400 mt-0.5">{{ qa_report.keep_pass or 0 }} 条 ≥ 5</div>
       </div>
       <div class="px-5 py-4">
-        <div class="text-xs text-slate-500">遵循度均(≥7 算过)</div>
+        <div class="text-xs text-slate-500">指令遵循度 均(≥7 算过)</div>
         <div class="text-2xl font-bold text-slate-800 mt-0.5">
           {% if qa_report.adherence_avg is not none %}{{ qa_report.adherence_avg }}{% else %}—{% endif %}
         </div>
@@ -61,13 +61,16 @@
   <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div class="flex items-center gap-2">
-        <button @click="acceptAll()" type="button"
-                class="text-xs bg-green-100 hover:bg-green-200 text-green-800 px-3 py-1.5 rounded-lg">✓ 全部接受</button>
-        <button @click="rejectAll()" type="button"
-                class="text-xs bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1.5 rounded-lg">✗ 全部拒绝</button>
+        <button @click="acceptAll()" :disabled="bulkBusy" type="button"
+                class="text-xs bg-green-100 hover:bg-green-200 disabled:opacity-50 text-green-800 px-3 py-1.5 rounded-lg">
+          <span x-show="!bulkBusy">✓ 全部接受</span>
+          <span x-show="bulkBusy">处理中...</span>
+        </button>
+        <button @click="rejectAll()" :disabled="bulkBusy" type="button"
+                class="text-xs bg-red-100 hover:bg-red-200 disabled:opacity-50 text-red-800 px-3 py-1.5 rounded-lg">✗ 全部驳回</button>
         <span class="text-xs text-slate-500 ml-2">
           已接受 <span class="font-medium text-green-700" x-text="acceptedCount"></span> ·
-          已拒绝 <span class="font-medium text-red-700" x-text="rejectedCount"></span> ·
+          已驳回 <span class="font-medium text-red-700" x-text="rejectedCount"></span> ·
           未审 <span x-text="unreviewedCount"></span>
         </span>
       </div>
@@ -77,7 +80,7 @@
         </span>
         <button @click="openIterate = !openIterate" type="button"
                 class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg">
-          ↻ 让 AI 改一遍拒绝的
+          ↻ 让 AI 改一遍被驳回的
         </button>
         <form method="POST" action="/rewrite/{{ run.id }}/confirm" class="inline"
               @submit="return confirmExport($event)">
@@ -89,8 +92,30 @@
       </div>
     </div>
 
+    <!-- Filter chips (rewrite mode) -->
+    <div class="mt-3 pt-3 border-t border-slate-200 flex items-center gap-2 text-xs flex-wrap">
+      <span class="text-slate-500">筛选:</span>
+      <button type="button" @click="filterMode='all'"
+              :class="filterMode==='all' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+              class="px-2.5 py-1 rounded-full">全部</button>
+      <button type="button" @click="filterMode='unreviewed'"
+              :class="filterMode==='unreviewed' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+              class="px-2.5 py-1 rounded-full">未审</button>
+      <button type="button" @click="filterMode='rejected'"
+              :class="filterMode==='rejected' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+              class="px-2.5 py-1 rounded-full">已驳回</button>
+      <button type="button" @click="filterMode='low_quality'"
+              :class="filterMode==='low_quality' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+              class="px-2.5 py-1 rounded-full">低质量(keep&lt;5 或 adh&lt;7)</button>
+      <input type="text" x-model="searchText" placeholder="🔍 搜索 prompt 文本..."
+             class="flex-1 max-w-xs border border-slate-300 rounded-full px-3 py-1 text-xs">
+      <span class="text-slate-400" x-show="searchText || filterMode!=='all'">
+        匹配 <span x-text="visibleCount"></span> 条
+      </span>
+    </div>
+
     <div x-show="openIterate" x-cloak class="mt-3 pt-3 border-t border-slate-200">
-      <p class="text-xs text-slate-600 mb-2">把拒绝的全部交给 AI 再改一遍。指令叠加你下面这段补充说明:</p>
+      <p class="text-xs text-slate-600 mb-2">把驳回的全部交给 AI 再改一遍。指令叠加你下面这段补充说明:</p>
       <textarea x-model="iterateRefinement" rows="3" placeholder="例:再加多一些感官细节;主体改成不要那么夸张"
                 class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"></textarea>
       <div class="flex justify-end gap-2 mt-2">
@@ -110,37 +135,44 @@
   <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
     <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
       <h3 class="text-lg font-bold text-slate-900">改写对比({{ run.prompts|length }} 条)</h3>
-      <div class="text-xs text-slate-500">★ 单条接受/拒绝/编辑</div>
+      <div class="text-xs text-slate-500">★ 单条接受/驳回 · 按 <kbd class="bg-slate-100 px-1 rounded">j</kbd>/<kbd class="bg-slate-100 px-1 rounded">k</kbd> 上下,<kbd class="bg-slate-100 px-1 rounded">a</kbd>/<kbd class="bg-slate-100 px-1 rounded">r</kbd> 接受/驳回</div>
     </div>
 
     <div class="divide-y divide-slate-100">
       {% for p in run.prompts %}
       {% set sp = source_by_pid.get(p.id) %}
-      <div class="p-4 hover:bg-slate-50"
+      <div class="p-4 hover:bg-slate-50 rw-row"
+           data-pid="{{ p.id }}"
+           data-prompt="{{ (p.prompt_zh + ' ' + (p.prompt_en or '')) | lower }}"
+           data-keep="{{ p.rewrite_kept_score if p.rewrite_kept_score is not none else -1 }}"
+           data-adh="{{ p.rewrite_adherence_score if p.rewrite_adherence_score is not none else -1 }}"
+           x-show="isRowVisible('{{ p.id }}', {{ p.rewrite_kept_score if p.rewrite_kept_score is not none else -1 }}, {{ p.rewrite_adherence_score if p.rewrite_adherence_score is not none else -1 }}, {{ (p.prompt_zh + ' ' + (p.prompt_en or '')) | tojson }})"
            :class="decisions['{{ p.id }}'] === false ? 'bg-red-50/40' : (decisions['{{ p.id }}'] === true ? 'bg-green-50/40' : '')">
         <div class="flex items-start justify-between gap-3 mb-2">
           <div class="flex items-center gap-2 text-xs">
             <code class="bg-slate-100 px-1.5 py-0.5 rounded">{{ p.id }}</code>
             {% if p.rewrite_kept_score is not none %}
             <span class="px-2 py-0.5 rounded font-medium
-              {% if p.rewrite_kept_score >= 5 %}bg-green-100 text-green-800{% else %}bg-red-100 text-red-800{% endif %}">
-              keep {{ p.rewrite_kept_score }}/10
+              {% if p.rewrite_kept_score >= 5 %}bg-green-100 text-green-800{% else %}bg-red-100 text-red-800{% endif %}"
+              title="保持率 (原意有没有丢)">
+              原意保留 {{ p.rewrite_kept_score }}/10
             </span>
             {% else %}
             <span class="px-2 py-0.5 rounded font-medium bg-slate-200 text-slate-600" title="judge 失败,未打分">
-              keep ⚠
+              原意保留 ⚠
             </span>
             {% endif %}
             {% if p.rewrite_adherence_score is not none %}
             <span class="px-2 py-0.5 rounded font-medium
               {% if p.rewrite_adherence_score >= 7 %}bg-green-100 text-green-800
               {% elif p.rewrite_adherence_score >= 5 %}bg-amber-100 text-amber-800
-              {% else %}bg-red-100 text-red-800{% endif %}">
-              adh {{ p.rewrite_adherence_score }}/10
+              {% else %}bg-red-100 text-red-800{% endif %}"
+              title="遵循度 (LLM 有没有按你说的改)">
+              指令遵循 {{ p.rewrite_adherence_score }}/10
             </span>
             {% else %}
             <span class="px-2 py-0.5 rounded font-medium bg-slate-200 text-slate-600" title="judge 失败,未打分">
-              adh ⚠
+              指令遵循 ⚠
             </span>
             {% endif %}
             {% if p.qa_rule_errors %}
@@ -203,9 +235,33 @@ function rewriteReview() {
     iterateRefinement: '',
     iterating: false,
     iterateError: '',
+    bulkBusy: false,
+    filterMode: 'all',
+    searchText: '',
     get acceptedCount() { return Object.values(this.decisions).filter(v => v === true).length; },
     get rejectedCount() { return Object.values(this.decisions).filter(v => v === false).length; },
     get unreviewedCount() { return Object.values(this.decisions).filter(v => v === null).length; },
+    get visibleCount() {
+      return document.querySelectorAll('.rw-row[style*="display: none"]').length === 0
+        ? Object.keys(this.decisions).length
+        : Object.keys(this.decisions).length - document.querySelectorAll('.rw-row[style*="display: none"]').length;
+    },
+    isRowVisible(pid, keep, adh, text) {
+      // Filter
+      if (this.filterMode === 'unreviewed' && this.decisions[pid] !== null) return false;
+      if (this.filterMode === 'rejected' && this.decisions[pid] !== false) return false;
+      if (this.filterMode === 'low_quality') {
+        const lowKeep = keep >= 0 && keep < 5;
+        const lowAdh = adh >= 0 && adh < 7;
+        if (!lowKeep && !lowAdh) return false;
+      }
+      // Search
+      if (this.searchText) {
+        const q = this.searchText.toLowerCase();
+        if (!text.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    },
     async decide(pid, action) {
       const form = new FormData();
       form.append('decision', action);
@@ -217,25 +273,34 @@ function rewriteReview() {
       } catch (e) { console.error(e); }
     },
     confirmExport(e) {
-      // P2-9: warn before dropping rejected entries
       const rejN = this.rejectedCount;
-      if (rejN > 0 && !confirm(`将丢弃 ${rejN} 条被拒绝的产物,无法恢复。确认导出?`)) {
+      if (rejN > 0 && !confirm(`将丢弃 ${rejN} 条被驳回的产物,无法恢复。确认导出?`)) {
         e.preventDefault();
         return false;
       }
       return true;
     },
-    async acceptAll() {
-      for (const pid of Object.keys(this.decisions)) await this.decide(pid, 'accept');
+    async _bulkDecide(decision) {
+      this.bulkBusy = true;
+      try {
+        const r = await fetch('/rewrite/{{ run.id }}/decide_bulk', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({decision}),     // omit ids → apply to all
+        });
+        if (r.ok) {
+          const target = decision === 'accept' ? true : (decision === 'reject' ? false : null);
+          for (const pid of Object.keys(this.decisions)) this.decisions[pid] = target;
+        }
+      } catch (e) { alert('批量操作失败: ' + e); }
+      finally { this.bulkBusy = false; }
     },
-    async rejectAll() {
-      for (const pid of Object.keys(this.decisions)) await this.decide(pid, 'reject');
-    },
+    acceptAll() { return this._bulkDecide('accept'); },
+    rejectAll() { return this._bulkDecide('reject'); },
     async startIterate() {
       this.iterating = true;
       this.iterateError = '';
       const rejected = Object.entries(this.decisions).filter(([_, v]) => v === false).map(([k]) => k);
-      // Need source_ids not prompt_ids — they share the rw_ prefix so strip it
       const source_ids = rejected.map(rid => rid.replace(/^rw_/, ''));
       try {
         const r = await fetch('/rewrite/{{ run.id }}/iterate', {
@@ -248,10 +313,23 @@ function rewriteReview() {
           this.iterateError = (data.message || ('HTTP ' + r.status));
           return;
         }
-        // Reload to show generating page with iterate progress
         window.location.href = '/runs/{{ run.id }}';
       } catch (e) { this.iterateError = String(e); }
       finally { this.iterating = false; }
+    },
+    init() {
+      // Keyboard: j/k navigate, a/r accept/reject
+      this._cursor = -1;
+      document.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        const rows = [...document.querySelectorAll('.rw-row:not([style*="display: none"])')];
+        if (rows.length === 0) return;
+        if (e.key === 'j') { this._cursor = Math.min(this._cursor + 1, rows.length - 1); rows[this._cursor].scrollIntoView({block:'center'}); rows.forEach(r=>r.classList.remove('ring-2','ring-orange-300')); rows[this._cursor].classList.add('ring-2','ring-orange-300'); }
+        else if (e.key === 'k') { this._cursor = Math.max(this._cursor - 1, 0); rows[this._cursor].scrollIntoView({block:'center'}); rows.forEach(r=>r.classList.remove('ring-2','ring-orange-300')); rows[this._cursor].classList.add('ring-2','ring-orange-300'); }
+        else if (e.key === 'a' && this._cursor >= 0) { this.decide(rows[this._cursor].dataset.pid, 'accept'); }
+        else if (e.key === 'r' && this._cursor >= 0) { this.decide(rows[this._cursor].dataset.pid, 'reject'); }
+        else if (e.key === '/') { e.preventDefault(); document.querySelector('input[x-model="searchText"]').focus(); }
+      });
     },
   };
 }
@@ -265,7 +343,7 @@ function rewriteReview() {
   <div class="flex items-center gap-2 text-sm">
     <span class="text-slate-500">返回上一步重做:</span>
     <form method="POST" action="/runs/{{ run.id }}/goto/P1_DIMENSIONS" class="inline"
-          onsubmit="return confirm('返回确定评测维度?现在的用例和质检结果会被清空,需要重新跑。')">
+          onsubmit="return confirm('返回「确定评测维度」?现在的{{ run.prompts|length }} 条用例 + 质检结果会被清空,需要重新跑。')">
       <button type="submit" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-lg text-xs">
         ↺ 改检查项 / 测试变量
       </button>
@@ -292,8 +370,11 @@ function rewriteReview() {
       </form>
     </div>
     <div class="grid grid-cols-2 md:grid-cols-5 gap-0 divide-x divide-slate-100">
-      <div class="px-5 py-4">
-        <div class="text-xs text-slate-500">通过率</div>
+      <!-- Clickable: filter to failed -->
+      <button type="button" @click="filterMode = filterMode === 'failed' ? 'all' : 'failed'"
+              :class="filterMode === 'failed' ? 'bg-amber-50' : ''"
+              class="px-5 py-4 text-left hover:bg-slate-50 transition">
+        <div class="text-xs text-slate-500">通过率<span class="text-slate-400 ml-1">(点击只看未通过)</span></div>
         <div class="text-2xl font-bold mt-0.5
           {% if qa_report.pass_rate >= 0.9 %}text-green-600
           {% elif qa_report.pass_rate >= 0.7 %}text-orange-500
@@ -301,21 +382,25 @@ function rewriteReview() {
           {{ "%.0f"|format(qa_report.pass_rate * 100) }}%
         </div>
         <div class="text-xs text-slate-400 mt-0.5">{{ qa_report.passed }}/{{ qa_report.total }}</div>
-      </div>
-      <div class="px-5 py-4">
-        <div class="text-xs text-slate-500">规则不过</div>
+      </button>
+      <button type="button" @click="filterMode = filterMode === 'rule_fail' ? 'all' : 'rule_fail'"
+              :class="filterMode === 'rule_fail' ? 'bg-amber-50' : ''"
+              class="px-5 py-4 text-left hover:bg-slate-50 transition">
+        <div class="text-xs text-slate-500">规则不过<span class="text-slate-400 ml-1">(点击筛)</span></div>
         <div class="text-2xl font-bold text-slate-800 mt-0.5">{{ qa_report.fail_rules or 0 }}</div>
         <div class="text-xs text-slate-400 mt-0.5">长度/禁词/字段</div>
-      </div>
-      <div class="px-5 py-4">
-        <div class="text-xs text-slate-500">自然度低于 7</div>
+      </button>
+      <button type="button" @click="filterMode = filterMode === 'naturalness_low' ? 'all' : 'naturalness_low'"
+              :class="filterMode === 'naturalness_low' ? 'bg-amber-50' : ''"
+              class="px-5 py-4 text-left hover:bg-slate-50 transition">
+        <div class="text-xs text-slate-500">自然度低于 7<span class="text-slate-400 ml-1">(点击筛)</span></div>
         <div class="text-2xl font-bold text-slate-800 mt-0.5">{{ qa_report.fail_naturalness or 0 }}</div>
         <div class="text-xs text-slate-400 mt-0.5">
           {% if qa_report.judges_ran %}
             中 {{ qa_report.naturalness_zh_avg }} ／ 英 {{ qa_report.naturalness_en_avg }}
           {% else %}—{% endif %}
         </div>
-      </div>
+      </button>
       <div class="px-5 py-4">
         <div class="text-xs text-slate-500">检查项反核不一致</div>
         <div class="text-2xl font-bold text-slate-800 mt-0.5">{{ qa_report.fail_coverage or 0 }}</div>
@@ -349,11 +434,13 @@ function rewriteReview() {
       </div>
       <div class="text-xs text-slate-400 mt-1">目标 60% / 40%</div>
     </div>
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
-      <div class="text-xs text-slate-500 uppercase tracking-wide">故意刁难的用例</div>
+    <button type="button" @click="filterMode = filterMode === 'stress' ? 'all' : 'stress'"
+            :class="filterMode === 'stress' ? 'ring-2 ring-orange-400' : ''"
+            class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 text-left hover:bg-slate-50 transition">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">故意刁难的用例 <span class="text-slate-400 normal-case">(点击筛)</span></div>
       <div class="text-3xl font-bold text-orange-600 mt-1">{{ coverage.stress_count }}</div>
       <div class="text-xs text-slate-400 mt-1">{{ "%.1f"|format(coverage.stress_ratio * 100) }}% / 目标 30%</div>
-    </div>
+    </button>
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
       <div class="text-xs text-slate-500 uppercase tracking-wide">检查项覆盖</div>
       {% set covered_sl2 = (coverage.sl2_hit_counts.values()|select|list)|length %}
@@ -369,7 +456,8 @@ function rewriteReview() {
         {% for sl2 in run.sl2_list %}
         {% set count = coverage.sl2_hit_counts.get(sl2.id, 0) %}
         <div class="flex items-center gap-3 text-xs">
-          <div class="w-40 truncate text-slate-700" title="{{ sl2.name }}">{{ sl2.name }}</div>
+          <button type="button" @click="searchText = '{{ sl2.id }}'; filterMode = 'sl2_match'"
+                  class="w-40 truncate text-left text-slate-700 hover:text-orange-600 hover:underline" title="点击只看这个检查项 — {{ sl2.name }}">{{ sl2.name }}</button>
           <div class="flex-1 bg-slate-100 rounded h-5 relative overflow-hidden">
             <div class="h-full bg-gradient-to-r from-orange-400 to-orange-500" style="width: {{ (count * 8)|round }}%; max-width: 100%;"></div>
             <span class="absolute inset-0 flex items-center px-2 text-xs font-medium text-slate-700">{{ count }}</span>
@@ -408,24 +496,81 @@ function rewriteReview() {
 
   <!-- Prompts table -->
   <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-      <h3 class="text-lg font-bold text-slate-900">测试用例列表</h3>
-      <div class="text-xs text-slate-500">点 <code class="bg-slate-100 px-1 rounded">展开</code> 看英文 / 变量;点 <code class="bg-slate-100 px-1 rounded">删除</code> 去掉单条</div>
+    <div class="px-6 py-4 border-b border-slate-200 space-y-3">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="text-lg font-bold text-slate-900">测试用例列表</h3>
+        <div class="flex items-center gap-2 text-xs">
+          <span class="text-slate-500">显示:</span>
+          <button type="button" @click="viewMode = 'zh'" :class="viewMode === 'zh' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'" class="px-2 py-1 rounded">仅中文</button>
+          <button type="button" @click="viewMode = 'both'" :class="viewMode === 'both' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'" class="px-2 py-1 rounded">中英并列</button>
+          <button type="button" @click="viewMode = 'full'" :class="viewMode === 'full' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'" class="px-2 py-1 rounded">全部展开</button>
+        </div>
+      </div>
+      <!-- Filter chips + search + bulk -->
+      <div class="flex items-center gap-2 text-xs flex-wrap">
+        <span class="text-slate-500">筛选:</span>
+        <button type="button" @click="filterMode = 'all'"
+                :class="filterMode === 'all' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+                class="px-2.5 py-1 rounded-full">全部</button>
+        <button type="button" @click="filterMode = 'failed'"
+                :class="filterMode === 'failed' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+                class="px-2.5 py-1 rounded-full">未通过</button>
+        <button type="button" @click="filterMode = 'stress'"
+                :class="filterMode === 'stress' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+                class="px-2.5 py-1 rounded-full">故意刁难</button>
+        <input type="text" x-model="searchText" placeholder="🔍 搜索 prompt 文本 / 检查项 id..."
+               class="flex-1 max-w-xs border border-slate-300 rounded-full px-3 py-1">
+        <span class="text-slate-400" x-show="searchText || filterMode !== 'all'">
+          匹配 <span x-text="visibleCount"></span> / {{ run.prompts|length }} 条
+        </span>
+      </div>
+      <!-- Bulk select bar -->
+      <div class="flex items-center gap-2 text-xs" x-show="selectedIds.length > 0" x-cloak>
+        <span class="text-slate-700 font-medium">已选 <span x-text="selectedIds.length"></span> 条</span>
+        <button type="button" @click="bulkDelete()" :disabled="bulkBusy"
+                class="bg-red-100 hover:bg-red-200 disabled:opacity-50 text-red-800 px-3 py-1 rounded-lg">
+          <span x-show="!bulkBusy">🗑 批量删除</span><span x-show="bulkBusy">删除中...</span>
+        </button>
+        <button type="button" @click="selectedIds = []"
+                class="text-slate-500 hover:text-slate-800 px-2 py-1">清空选择</button>
+      </div>
     </div>
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="bg-slate-50 text-xs font-medium text-slate-500 uppercase">
           <tr>
+            <th class="px-2 py-2 w-8">
+              <input type="checkbox" @change="toggleSelectAll($event.target.checked)"
+                     :checked="selectedIds.length > 0 && selectedIds.length === visibleCount"
+                     title="全选当前可见">
+            </th>
             <th class="px-4 py-2 text-left">编号</th>
             <th class="px-4 py-2 text-left">难度</th>
             <th class="px-4 py-2 text-left">覆盖检查项</th>
-            <th class="px-4 py-2 text-left">用例内容(中文)</th>
+            <th class="px-4 py-2 text-left">用例内容</th>
             <th class="px-4 py-2"></th>
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-100">
+          {% set sl2_name_map = {} %}
+          {% for sl2 in run.sl2_list %}{% set _ = sl2_name_map.update({sl2.id: sl2.name}) %}{% endfor %}
           {% for p in run.prompts %}
-          <tr class="hover:bg-slate-50 {% if p.needs_human_review %}bg-amber-50{% endif %}" x-data="{ expanded: false }">
+          {% set p_failed = p.qa_rule_errors or (p.qa_naturalness_zh is not none and p.qa_naturalness_zh < 7) or (p.qa_naturalness_en is not none and p.qa_naturalness_en < 7) or p.qa_coverage_match == false %}
+          {% set p_rule_fail = p.qa_rule_errors|length > 0 %}
+          {% set p_nat_low = (p.qa_naturalness_zh is not none and p.qa_naturalness_zh < 7) or (p.qa_naturalness_en is not none and p.qa_naturalness_en < 7) %}
+          <tr class="hover:bg-slate-50 prompt-row {% if p.needs_human_review %}bg-amber-50{% endif %}"
+              data-pid="{{ p.id }}"
+              data-text="{{ ((p.prompt_zh or '') + ' ' + (p.prompt_en or '') + ' ' + (p.sl2_covered|join(' '))) | lower }}"
+              data-failed="{{ 1 if p_failed else 0 }}"
+              data-stress="{{ 1 if p.is_stress else 0 }}"
+              data-rulefail="{{ 1 if p_rule_fail else 0 }}"
+              data-natlow="{{ 1 if p_nat_low else 0 }}"
+              x-show="isRowVisible($el)"
+              x-data="{ expanded: false }">
+            <td class="px-2 py-2 align-top">
+              <input type="checkbox" :value="'{{ p.id }}'" @change="toggleOne('{{ p.id }}', $event.target.checked)"
+                     :checked="selectedIds.includes('{{ p.id }}')">
+            </td>
             <td class="px-4 py-2 text-xs font-mono align-top">
               <div class="flex items-center gap-1 flex-wrap">
                 <span>{{ p.id }}</span>
@@ -448,20 +593,21 @@ function rewriteReview() {
             <td class="px-4 py-2 align-top">
               <div class="flex flex-wrap gap-1 max-w-[180px]">
                 {% for sid in p.sl2_covered %}
-                <span class="text-xs bg-slate-100 px-1.5 py-0.5 rounded text-slate-700">{{ sid }}</span>
+                <span class="text-xs bg-slate-100 px-1.5 py-0.5 rounded text-slate-700" title="id: {{ sid }}">{{ sl2_name_map.get(sid, sid) }}</span>
                 {% endfor %}
               </div>
             </td>
             <td class="px-4 py-2 align-top max-w-md">
               <div class="text-slate-800">{{ p.prompt_zh }}</div>
-              <div x-show="expanded" x-cloak class="mt-2 text-xs text-slate-500 italic">
+              <div x-show="viewMode === 'both' || viewMode === 'full' || expanded" x-cloak class="mt-2 text-xs text-slate-500 italic">
                 {{ p.prompt_en }}
               </div>
-              <div x-show="expanded" x-cloak class="mt-1 text-xs text-slate-400">
-                条件: {% for k, v in p.axes_values.items() %}<span class="mr-2">{{ k }}={{ v }}</span>{% endfor %}
+              <div x-show="viewMode === 'full' || expanded" x-cloak class="mt-1 text-xs text-slate-400">
+                条件:
+                {% for k, v in p.axes_values.items() %}<span class="mr-2">{{ k }}={{ v }}</span>{% endfor %}
               </div>
               {% if p.qa_rule_errors or p.qa_naturalness_zh is not none or p.qa_judged_sl2 %}
-              <div x-show="expanded" x-cloak class="mt-2 pt-2 border-t border-slate-200 text-xs space-y-1">
+              <div x-show="viewMode === 'full' || expanded" x-cloak class="mt-2 pt-2 border-t border-slate-200 text-xs space-y-1">
                 {% if p.qa_rule_errors %}
                 <div class="text-red-600">
                   <span class="font-medium">规则错误:</span> {{ p.qa_rule_errors|join('; ') }}
@@ -480,7 +626,7 @@ function rewriteReview() {
                 {% if p.qa_judged_sl2 %}
                 <div class="text-slate-500">
                   <span class="font-medium">AI 反核覆盖:</span>
-                  {% for sid in p.qa_judged_sl2 %}<span class="inline-block bg-slate-100 px-1 rounded mr-1">{{ sid }}</span>{% endfor %}
+                  {% for sid in p.qa_judged_sl2 %}<span class="inline-block bg-slate-100 px-1 rounded mr-1" title="id: {{ sid }}">{{ sl2_name_map.get(sid, sid) }}</span>{% endfor %}
                   {% if p.qa_coverage_match == false %}
                   <span class="text-red-600 ml-1">⚠ 与自报不一致</span>
                   {% elif p.qa_coverage_match %}
@@ -506,6 +652,68 @@ function rewriteReview() {
 </div>
 
 <script>
+  function generateReview() {
+    return {
+      filterMode: 'all',
+      searchText: '',
+      viewMode: 'zh',   // zh | both | full
+      selectedIds: [],
+      bulkBusy: false,
+      get visibleCount() {
+        return document.querySelectorAll('.prompt-row:not([style*="display: none"])').length;
+      },
+      isRowVisible(el) {
+        const failed = el.dataset.failed === '1';
+        const stress = el.dataset.stress === '1';
+        const ruleFail = el.dataset.rulefail === '1';
+        const natLow = el.dataset.natlow === '1';
+        const text = el.dataset.text || '';
+        // Filter
+        if (this.filterMode === 'failed' && !failed) return false;
+        if (this.filterMode === 'stress' && !stress) return false;
+        if (this.filterMode === 'rule_fail' && !ruleFail) return false;
+        if (this.filterMode === 'naturalness_low' && !natLow) return false;
+        if (this.filterMode === 'sl2_match' && this.searchText && !text.includes(this.searchText.toLowerCase())) return false;
+        // Search
+        if (this.searchText && this.filterMode !== 'sl2_match') {
+          if (!text.includes(this.searchText.toLowerCase())) return false;
+        }
+        return true;
+      },
+      toggleOne(pid, on) {
+        if (on && !this.selectedIds.includes(pid)) this.selectedIds.push(pid);
+        else if (!on) this.selectedIds = this.selectedIds.filter(x => x !== pid);
+      },
+      toggleSelectAll(on) {
+        const visible = [...document.querySelectorAll('.prompt-row:not([style*="display: none"])')]
+          .map(r => r.dataset.pid);
+        this.selectedIds = on ? visible : [];
+      },
+      async bulkDelete() {
+        if (this.selectedIds.length === 0) return;
+        if (!confirm(`确认删除 ${this.selectedIds.length} 条用例?不可撤销。`)) return;
+        this.bulkBusy = true;
+        try {
+          const r = await fetch('/runs/{{ run.id }}/p4/drop_bulk', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ids: this.selectedIds}),
+          });
+          if (r.ok) window.location.reload();
+          else alert('删除失败: HTTP ' + r.status);
+        } catch (e) { alert('删除失败: ' + e); }
+        finally { this.bulkBusy = false; }
+      },
+      init() {
+        // Keyboard '/' focuses search
+        document.addEventListener('keydown', (e) => {
+          if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+          if (e.key === '/') { e.preventDefault(); document.querySelector('input[x-model="searchText"]').focus(); }
+        });
+      },
+    };
+  }
+
   const ctx = document.getElementById('dist-chart').getContext('2d');
   new Chart(ctx, {
     type: 'doughnut',
@@ -529,7 +737,7 @@ function rewriteReview() {
   <!-- 8-dim coverage panel (shared by both modes) -->
   {% if coverage_8d %}
   <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2">
       <div>
         <h3 class="text-lg font-bold text-slate-900">8 维标签覆盖</h3>
         <p class="text-xs text-slate-500">
@@ -537,7 +745,17 @@ function rewriteReview() {
           {% if coverage_8d.gaps_count %} · <span class="text-amber-700">⚠ {{ coverage_8d.gaps_count }} 个空缺</span>{% endif %}
         </p>
       </div>
-      <div class="text-xs text-slate-500">共 {{ coverage_8d.total_prompts }} 条 prompt</div>
+      <div class="flex items-center gap-3 text-xs">
+        <span class="text-slate-500">共 {{ coverage_8d.total_prompts }} 条 prompt</span>
+        {% if coverage_8d.gaps_count and run.source != 'rewrite' %}
+        <form method="POST" action="/runs/{{ run.id }}/goto/P1_DIMENSIONS" class="inline"
+              onsubmit="return confirm('回到「确定评测维度」补 tag?现在的 {{ run.prompts|length }} 条用例会被清空。')">
+          <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded-lg">
+            ↺ 回去补 tag
+          </button>
+        </form>
+        {% endif %}
+      </div>
     </div>
     <div class="divide-y divide-slate-100">
       {% for d in coverage_8d.dims %}

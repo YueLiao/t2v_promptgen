@@ -221,6 +221,10 @@ class Run(BaseModel):
     """A complete generation run, persisted to runs.db for resume support."""
     id: str = Field(..., description="UUID")
     capability_slug: str
+    capability_display_name: str | None = Field(
+        default=None,
+        description="Human-readable zh name shown in UI; falls back to slug when None"
+    )
     created_at: datetime
     updated_at: datetime
     phase: Phase
