@@ -73,23 +73,15 @@
           </select>
         </div>
 
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-slate-700 mb-1">
-              <span class="text-emerald-700">分析模型</span>
-              <span class="text-xs text-slate-400 font-normal">— 字段映射 + 改写质检</span>
-            </label>
-            <input name="model_p1" value="deepseek-chat" placeholder="deepseek-chat"
-              class="w-full border border-emerald-300 rounded-lg px-3 py-2 text-sm font-mono">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-slate-700 mb-1">
-              <span class="text-sky-700">改写模型</span>
-              <span class="text-xs text-slate-400 font-normal">— 批量改写,用得多</span>
-            </label>
-            <input name="model_p2" value="deepseek-chat" placeholder="deepseek-chat"
-              class="w-full border border-sky-300 rounded-lg px-3 py-2 text-sm font-mono">
-          </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">
+            <span class="text-sky-700">使用的模型</span>
+            <span class="text-xs text-slate-400 font-normal">— 字段映射 + 批量改写 + 质检都用这一个</span>
+          </label>
+          <input name="model_p2" value="deepseek-chat" placeholder="deepseek-chat"
+            class="w-full border border-sky-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <!-- model_p1 is unused in rewrite flow; submit same value so RUN_CREDS stays consistent -->
+          <input type="hidden" name="model_p1" value="deepseek-chat">
         </div>
 
         <div class="border-2 border-orange-300 rounded-lg p-4 bg-orange-50">

@@ -33,7 +33,9 @@
 <div class="bg-white border-b border-slate-200"
      {% if run %}x-data="{ raiseBudget() {
        const cur = {{ run.cost_usd_limit or 0 }};
-       const ans = prompt('当前预算 $' + cur.toFixed(2) + ',输入新的上限 USD (0 = 不限额):', (cur + 10).toFixed(2));
+       const label = cur > 0 ? ('当前上限 $' + cur.toFixed(2)) : '当前未设上限';
+       const suggest = cur > 0 ? (cur + 10).toFixed(2) : '10.00';
+       const ans = prompt(label + ',输入新的上限 USD (0 = 不限额):', suggest);
        if (ans === null) return;
        const newLim = parseFloat(ans);
        if (isNaN(newLim) || newLim < 0) { alert('数字不合法'); return; }

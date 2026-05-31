@@ -212,3 +212,58 @@ def test_run_carries_display_name(client):
     # JSON-roundtrip preserves it
     j = run.model_dump_json()
     assert "测试能力" in j
+
+
+# ---------------------------------------------------------------------------
+# UI revamp review-round regressions
+# ---------------------------------------------------------------------------
+
+def test_review_page_renders_with_xss_unsafe_prompt(client):
+    """Audit P0: review template embedded prompt text via Jinja tojson into
+    an HTML attribute (x-show). A prompt containing a double-quote would
+    break out of the attribute. The fix moves text to a JS-side ROW_DATA
+    map. Render a prompt with " and \\ and verify nothing leaks into an
+    attribute value that would be syntactically broken."""
+    from datetime import datetime
+    run = Run(
+        id="ui_xss1", capability_slug="cap",
+        capability_display_name="cap",
+        created_at=datetime.now(), updated_at=datetime.now(),
+        phase=Phase.P4_REVIEW, source="rewrite",
+    )
+    run.prompts.append(PromptEntry(
+        id="rw_xss",
+        source_id='src" /><script>alert(1)</script><div data-x="',
+        capability="cap", capability_version=1,
+        difficulty="medium", difficulty_score=5.0,
+        sl2_covered=[], axes_values={},
+        subject_count=1, action_count=1,
+        camera_zh=None, camera_en=None,
+        prompt_zh='含"双引号"and\\back\\slash and <script>',
+        prompt_en='english with " quote',
+        generated_at=datetime.now(),
+    ))
+    RUNS["ui_xss1"] = run
+    try:
+        r = client.get("/runs/ui_xss1")
+        assert r.status_code == 200
+        body = r.text
+        # The unescaped attack string must NOT appear verbatim as raw HTML
+        # injection (script tag from prompt text shouldn't be parseable).
+        # tojson encodes it as a JS string literal — that's safe inside
+        # <script>...</script> but NOT inside an attribute. Verify it's
+        # inside a script block, not an attribute.
+        # Cheap check: the script tag from the prompt text must be escaped
+        # (no literal "<script>alert(1)" outside of safe-escape form).
+        # Jinja's tojson uses unicode escapes for `<` and `>`.
+        assert "<script>alert(1)" not in body
+        # The script-rendered ROW_DATA must include the pid as a JS key
+        assert '"rw_xss"' in body
+    finally:
+        RUNS.pop("ui_xss1", None)
+
+
+def test_progress_api_unknown_run_404(client):
+    # Already exists above but keeping a marker to verify ordering didn't shift
+    r = client.get("/api/runs/_unknown_/progress")
+    assert r.status_code == 404

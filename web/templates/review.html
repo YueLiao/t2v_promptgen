@@ -143,10 +143,7 @@
       {% set sp = source_by_pid.get(p.id) %}
       <div class="p-4 hover:bg-slate-50 rw-row"
            data-pid="{{ p.id }}"
-           data-prompt="{{ (p.prompt_zh + ' ' + (p.prompt_en or '')) | lower }}"
-           data-keep="{{ p.rewrite_kept_score if p.rewrite_kept_score is not none else -1 }}"
-           data-adh="{{ p.rewrite_adherence_score if p.rewrite_adherence_score is not none else -1 }}"
-           x-show="isRowVisible('{{ p.id }}', {{ p.rewrite_kept_score if p.rewrite_kept_score is not none else -1 }}, {{ p.rewrite_adherence_score if p.rewrite_adherence_score is not none else -1 }}, {{ (p.prompt_zh + ' ' + (p.prompt_en or '')) | tojson }})"
+           x-show="isRowVisible('{{ p.id }}')"
            :class="decisions['{{ p.id }}'] === false ? 'bg-red-50/40' : (decisions['{{ p.id }}'] === true ? 'bg-green-50/40' : '')">
         <div class="flex items-start justify-between gap-3 mb-2">
           <div class="flex items-center gap-2 text-xs">
@@ -224,10 +221,25 @@
   </div>
 
 <script>
+// Per-row immutable metadata, built server-side as a single JS object literal.
+// Avoids embedding user-supplied text into HTML attributes (XSS) and gives
+// Alpine getters real reactive deps to track.
+window.__REWRITE_ROWS__ = {
+  {% for p in run.prompts %}
+  {{ p.id | tojson }}: {
+    pid: {{ p.id | tojson }},
+    source_id: {{ p.source_id | tojson }},
+    keep: {{ p.rewrite_kept_score if p.rewrite_kept_score is not none else -1 }},
+    adh: {{ p.rewrite_adherence_score if p.rewrite_adherence_score is not none else -1 }},
+    text: {{ ((p.prompt_zh or '') + ' ' + (p.prompt_en or '')).lower() | tojson }},
+  },
+  {% endfor %}
+};
+
 function rewriteReview() {
   const initial = {};
   {% for p in run.prompts %}
-  initial['{{ p.id }}'] = {% if p.rewrite_accepted is true %}true{% elif p.rewrite_accepted is false %}false{% else %}null{% endif %};
+  initial[{{ p.id | tojson }}] = {% if p.rewrite_accepted is true %}true{% elif p.rewrite_accepted is false %}false{% else %}null{% endif %};
   {% endfor %}
   return {
     decisions: initial,
@@ -238,27 +250,31 @@ function rewriteReview() {
     bulkBusy: false,
     filterMode: 'all',
     searchText: '',
+    _cursor: -1,
     get acceptedCount() { return Object.values(this.decisions).filter(v => v === true).length; },
     get rejectedCount() { return Object.values(this.decisions).filter(v => v === false).length; },
     get unreviewedCount() { return Object.values(this.decisions).filter(v => v === null).length; },
     get visibleCount() {
-      return document.querySelectorAll('.rw-row[style*="display: none"]').length === 0
-        ? Object.keys(this.decisions).length
-        : Object.keys(this.decisions).length - document.querySelectorAll('.rw-row[style*="display: none"]').length;
+      // Reactive: reads this.filterMode / this.searchText / this.decisions
+      // via isRowVisible — so Alpine recomputes when any of those change.
+      let n = 0;
+      for (const pid of Object.keys(this.decisions)) if (this.isRowVisible(pid)) n++;
+      return n;
     },
-    isRowVisible(pid, keep, adh, text) {
+    isRowVisible(pid) {
+      const meta = window.__REWRITE_ROWS__[pid];
+      if (!meta) return true;
       // Filter
       if (this.filterMode === 'unreviewed' && this.decisions[pid] !== null) return false;
       if (this.filterMode === 'rejected' && this.decisions[pid] !== false) return false;
       if (this.filterMode === 'low_quality') {
-        const lowKeep = keep >= 0 && keep < 5;
-        const lowAdh = adh >= 0 && adh < 7;
+        const lowKeep = meta.keep >= 0 && meta.keep < 5;
+        const lowAdh = meta.adh >= 0 && meta.adh < 7;
         if (!lowKeep && !lowAdh) return false;
       }
       // Search
       if (this.searchText) {
-        const q = this.searchText.toLowerCase();
-        if (!text.toLowerCase().includes(q)) return false;
+        if (!meta.text.includes(this.searchText.toLowerCase())) return false;
       }
       return true;
     },
@@ -300,8 +316,12 @@ function rewriteReview() {
     async startIterate() {
       this.iterating = true;
       this.iterateError = '';
-      const rejected = Object.entries(this.decisions).filter(([_, v]) => v === false).map(([k]) => k);
-      const source_ids = rejected.map(rid => rid.replace(/^rw_/, ''));
+      // Use the actual source_id from ROW_DATA — don't strip a 'rw_' prefix
+      // (that assumed an id naming convention; the map carries the real id).
+      const source_ids = Object.entries(this.decisions)
+        .filter(([_, v]) => v === false)
+        .map(([pid]) => window.__REWRITE_ROWS__[pid]?.source_id)
+        .filter(Boolean);
       try {
         const r = await fetch('/rewrite/{{ run.id }}/iterate', {
           method: 'POST',
@@ -317,19 +337,27 @@ function rewriteReview() {
       } catch (e) { this.iterateError = String(e); }
       finally { this.iterating = false; }
     },
+    _onKey(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      const rows = [...document.querySelectorAll('.rw-row')].filter(r => r.style.display !== 'none');
+      if (rows.length === 0) return;
+      if (e.key === 'j') { this._cursor = Math.min(this._cursor + 1, rows.length - 1); }
+      else if (e.key === 'k') { this._cursor = Math.max(this._cursor - 1, 0); }
+      else if (e.key === 'a' && this._cursor >= 0) { this.decide(rows[this._cursor].dataset.pid, 'accept'); return; }
+      else if (e.key === 'r' && this._cursor >= 0) { this.decide(rows[this._cursor].dataset.pid, 'reject'); return; }
+      else if (e.key === '/') { e.preventDefault(); const s = document.querySelector('input[x-model="searchText"]'); if (s) s.focus(); return; }
+      else { return; }
+      // j/k path: highlight + scroll
+      rows.forEach(r => r.classList.remove('ring-2','ring-orange-300'));
+      const cur = rows[this._cursor];
+      if (cur) { cur.scrollIntoView({block:'center'}); cur.classList.add('ring-2','ring-orange-300'); }
+    },
     init() {
-      // Keyboard: j/k navigate, a/r accept/reject
-      this._cursor = -1;
-      document.addEventListener('keydown', (e) => {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-        const rows = [...document.querySelectorAll('.rw-row:not([style*="display: none"])')];
-        if (rows.length === 0) return;
-        if (e.key === 'j') { this._cursor = Math.min(this._cursor + 1, rows.length - 1); rows[this._cursor].scrollIntoView({block:'center'}); rows.forEach(r=>r.classList.remove('ring-2','ring-orange-300')); rows[this._cursor].classList.add('ring-2','ring-orange-300'); }
-        else if (e.key === 'k') { this._cursor = Math.max(this._cursor - 1, 0); rows[this._cursor].scrollIntoView({block:'center'}); rows.forEach(r=>r.classList.remove('ring-2','ring-orange-300')); rows[this._cursor].classList.add('ring-2','ring-orange-300'); }
-        else if (e.key === 'a' && this._cursor >= 0) { this.decide(rows[this._cursor].dataset.pid, 'accept'); }
-        else if (e.key === 'r' && this._cursor >= 0) { this.decide(rows[this._cursor].dataset.pid, 'reject'); }
-        else if (e.key === '/') { e.preventDefault(); document.querySelector('input[x-model="searchText"]').focus(); }
-      });
+      this._boundOnKey = this._onKey.bind(this);
+      document.addEventListener('keydown', this._boundOnKey);
+    },
+    destroy() {
+      if (this._boundOnKey) document.removeEventListener('keydown', this._boundOnKey);
     },
   };
 }
@@ -541,7 +569,7 @@ function rewriteReview() {
           <tr>
             <th class="px-2 py-2 w-8">
               <input type="checkbox" @change="toggleSelectAll($event.target.checked)"
-                     :checked="selectedIds.length > 0 && selectedIds.length === visibleCount"
+                     :checked="visibleCount > 0 && selectedIds.length >= visibleCount && visibleIds.every(pid => selectedIds.includes(pid))"
                      title="全选当前可见">
             </th>
             <th class="px-4 py-2 text-left">编号</th>
@@ -555,17 +583,9 @@ function rewriteReview() {
           {% set sl2_name_map = {} %}
           {% for sl2 in run.sl2_list %}{% set _ = sl2_name_map.update({sl2.id: sl2.name}) %}{% endfor %}
           {% for p in run.prompts %}
-          {% set p_failed = p.qa_rule_errors or (p.qa_naturalness_zh is not none and p.qa_naturalness_zh < 7) or (p.qa_naturalness_en is not none and p.qa_naturalness_en < 7) or p.qa_coverage_match == false %}
-          {% set p_rule_fail = p.qa_rule_errors|length > 0 %}
-          {% set p_nat_low = (p.qa_naturalness_zh is not none and p.qa_naturalness_zh < 7) or (p.qa_naturalness_en is not none and p.qa_naturalness_en < 7) %}
           <tr class="hover:bg-slate-50 prompt-row {% if p.needs_human_review %}bg-amber-50{% endif %}"
               data-pid="{{ p.id }}"
-              data-text="{{ ((p.prompt_zh or '') + ' ' + (p.prompt_en or '') + ' ' + (p.sl2_covered|join(' '))) | lower }}"
-              data-failed="{{ 1 if p_failed else 0 }}"
-              data-stress="{{ 1 if p.is_stress else 0 }}"
-              data-rulefail="{{ 1 if p_rule_fail else 0 }}"
-              data-natlow="{{ 1 if p_nat_low else 0 }}"
-              x-show="isRowVisible($el)"
+              x-show="isRowVisible('{{ p.id }}')"
               x-data="{ expanded: false }">
             <td class="px-2 py-2 align-top">
               <input type="checkbox" :value="'{{ p.id }}'" @change="toggleOne('{{ p.id }}', $event.target.checked)"
@@ -652,6 +672,25 @@ function rewriteReview() {
 </div>
 
 <script>
+  // Server-rendered per-row metadata. Keyed by pid, values are immutable.
+  // Avoids putting user-content into HTML attributes (XSS) and gives Alpine
+  // reactive getters a real prop to track (so visibleCount actually updates).
+  window.__GEN_ROWS__ = {
+    {% for p in run.prompts %}
+    {% set p_failed = p.qa_rule_errors or (p.qa_naturalness_zh is not none and p.qa_naturalness_zh < 7) or (p.qa_naturalness_en is not none and p.qa_naturalness_en < 7) or p.qa_coverage_match == false %}
+    {% set p_rule_fail = p.qa_rule_errors|length > 0 %}
+    {% set p_nat_low = (p.qa_naturalness_zh is not none and p.qa_naturalness_zh < 7) or (p.qa_naturalness_en is not none and p.qa_naturalness_en < 7) %}
+    {{ p.id | tojson }}: {
+      pid: {{ p.id | tojson }},
+      text: {{ ((p.prompt_zh or '') + ' ' + (p.prompt_en or '') + ' ' + (p.sl2_covered|join(' '))).lower() | tojson }},
+      failed: {{ p_failed | tojson }},
+      stress: {{ p.is_stress | tojson }},
+      ruleFail: {{ p_rule_fail | tojson }},
+      natLow: {{ p_nat_low | tojson }},
+    },
+    {% endfor %}
+  };
+
   function generateReview() {
     return {
       filterMode: 'all',
@@ -659,24 +698,24 @@ function rewriteReview() {
       viewMode: 'zh',   // zh | both | full
       selectedIds: [],
       bulkBusy: false,
-      get visibleCount() {
-        return document.querySelectorAll('.prompt-row:not([style*="display: none"])').length;
+      _allPids: Object.keys(window.__GEN_ROWS__),
+      get visibleIds() {
+        // Reactive — reads this.filterMode/this.searchText
+        return this._allPids.filter(pid => this.isRowVisible(pid));
       },
-      isRowVisible(el) {
-        const failed = el.dataset.failed === '1';
-        const stress = el.dataset.stress === '1';
-        const ruleFail = el.dataset.rulefail === '1';
-        const natLow = el.dataset.natlow === '1';
-        const text = el.dataset.text || '';
-        // Filter
-        if (this.filterMode === 'failed' && !failed) return false;
-        if (this.filterMode === 'stress' && !stress) return false;
-        if (this.filterMode === 'rule_fail' && !ruleFail) return false;
-        if (this.filterMode === 'naturalness_low' && !natLow) return false;
-        if (this.filterMode === 'sl2_match' && this.searchText && !text.includes(this.searchText.toLowerCase())) return false;
-        // Search
-        if (this.searchText && this.filterMode !== 'sl2_match') {
-          if (!text.includes(this.searchText.toLowerCase())) return false;
+      get visibleCount() { return this.visibleIds.length; },
+      isRowVisible(pid) {
+        const meta = window.__GEN_ROWS__[pid];
+        if (!meta) return true;
+        const q = (this.searchText || '').toLowerCase();
+        if (this.filterMode === 'failed' && !meta.failed) return false;
+        if (this.filterMode === 'stress' && !meta.stress) return false;
+        if (this.filterMode === 'rule_fail' && !meta.ruleFail) return false;
+        if (this.filterMode === 'naturalness_low' && !meta.natLow) return false;
+        // sl2_match uses the search box as the chip text (set by hit-chart click)
+        if (this.filterMode === 'sl2_match' && q && !meta.text.includes(q)) return false;
+        if (q && this.filterMode !== 'sl2_match') {
+          if (!meta.text.includes(q)) return false;
         }
         return true;
       },
@@ -685,9 +724,7 @@ function rewriteReview() {
         else if (!on) this.selectedIds = this.selectedIds.filter(x => x !== pid);
       },
       toggleSelectAll(on) {
-        const visible = [...document.querySelectorAll('.prompt-row:not([style*="display: none"])')]
-          .map(r => r.dataset.pid);
-        this.selectedIds = on ? visible : [];
+        this.selectedIds = on ? [...this.visibleIds] : [];
       },
       async bulkDelete() {
         if (this.selectedIds.length === 0) return;
@@ -704,12 +741,20 @@ function rewriteReview() {
         } catch (e) { alert('删除失败: ' + e); }
         finally { this.bulkBusy = false; }
       },
+      _onKey(e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (e.key === '/') {
+          e.preventDefault();
+          const s = document.querySelector('input[x-model="searchText"]');
+          if (s) s.focus();
+        }
+      },
       init() {
-        // Keyboard '/' focuses search
-        document.addEventListener('keydown', (e) => {
-          if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-          if (e.key === '/') { e.preventDefault(); document.querySelector('input[x-model="searchText"]').focus(); }
-        });
+        this._boundOnKey = this._onKey.bind(this);
+        document.addEventListener('keydown', this._boundOnKey);
+      },
+      destroy() {
+        if (this._boundOnKey) document.removeEventListener('keydown', this._boundOnKey);
       },
     };
   }
