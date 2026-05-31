@@ -54,6 +54,11 @@
             ({{ "%.0f"|format(pct) }}%)
           </span>
         </div>
+        {% else %}
+        <div class="text-xs mt-0.5 text-slate-500">
+          已花费: <span class="font-mono text-slate-700">${{ "%.4f"|format(run.cost_usd_used) }}</span>
+          <span class="text-slate-400 ml-1" title="预算上限为 0,表示不限额">(不限额)</span>
+        </div>
         {% endif %}
       </div>
     </div>

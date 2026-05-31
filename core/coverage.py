@@ -106,9 +106,15 @@ def _count_d1(prompts: list[PromptEntry]) -> dict[str, int]:
 
 # Map known D4 camera names (display strings stored in prompt.camera_zh)
 # to D4 value codes.
-def _build_d4_lookup() -> dict[str, str]:
-    """Map fragment of camera_zh text → D4 code."""
-    lookup: dict[str, str] = {}
+def _build_d4_lookup() -> list[tuple[str, str]]:
+    """Return [(token, D4-code), …] sorted by token length descending.
+
+    Longest first matters because we substring-match against camera_zh and
+    short tokens (e.g. "推") would otherwise win over more-specific ones
+    (e.g. "推近") or fire spuriously inside unrelated words (e.g. "推荐").
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for d in ALL_DIMENSIONS:
         if d.code != "D4":
             continue
@@ -116,38 +122,81 @@ def _build_d4_lookup() -> dict[str, str]:
             # name_zh might be "推" / "POV" / "微距/极近"
             for token in v.name_zh.split("/"):
                 token = token.strip()
-                if token:
-                    lookup[token] = v.code
-    return lookup
+                if token and token not in seen:
+                    pairs.append((token, v.code))
+                    seen.add(token)
+    pairs.sort(key=lambda kv: len(kv[0]), reverse=True)
+    return pairs
 
 
-_D4_LOOKUP = _build_d4_lookup()
+_D4_LOOKUP: list[tuple[str, str]] = _build_d4_lookup()
+
+
+# 1-character D4 tokens are ambiguous: "推" inside "推荐", "推动", "推理"
+# is NOT a camera push. Skip the match when the very next character produces
+# one of these common non-camera bigrams. Only applies to 1-char tokens.
+_D4_FALSE_BIGRAM_NEXT = {
+    "推": {"荐", "动", "出", "理", "测", "广", "进", "算", "翻", "辞", "崇"},
+    "拉": {"锯", "伸", "链", "拢", "萨", "丁", "拢"},
+    "摇": {"晃", "头", "滚", "篮", "摆", "曳", "椅"},
+    "跟": {"踪", "班", "头", "前", "屁", "脚"},   # 跟随 already a 2-char token
+}
 
 
 def _count_d4(prompts: list[PromptEntry]) -> dict[str, int]:
+    """Count D4 hits per prompt.
+
+    For each prompt's camera_zh we attribute at most ONE D4 code (the most
+    specific match — longest token wins via the sorted lookup). This avoids
+    double-counting a single camera move under multiple codes when keywords
+    overlap (e.g. "推近" vs "推") and also keeps the per-prompt total at
+    one, matching how planned coverage is declared.
+
+    For 1-char tokens we additionally reject matches that form common
+    non-camera Chinese bigrams (e.g. "推荐" / "拉锯") — best-effort.
+    """
     counts: dict[str, int] = {}
     for p in prompts:
         text = (p.camera_zh or "").strip()
         if not text:
             continue
-        # Find longest D4 token contained in text
-        for token, code in _D4_LOOKUP.items():
-            if token in text:
-                counts[code] = counts.get(code, 0) + 1
-                break    # one per prompt
+        for token, code in _D4_LOOKUP:
+            idx = text.find(token)
+            if idx < 0:
+                continue
+            # For 1-char tokens, scan all occurrences and accept only if at
+            # least one is NOT followed by a known false-positive bigram char.
+            if len(token) == 1:
+                blocked = _D4_FALSE_BIGRAM_NEXT.get(token, set())
+                accepted = False
+                pos = idx
+                while pos >= 0:
+                    nxt = text[pos + 1] if pos + 1 < len(text) else ""
+                    if nxt not in blocked:
+                        accepted = True
+                        break
+                    pos = text.find(token, pos + 1)
+                if not accepted:
+                    continue
+            counts[code] = counts.get(code, 0) + 1
+            break    # longest specific match wins; one per prompt
     return counts
 
 
-# Map scene_l1 (CN) → D6 E# code (rough; tag library uses different categories)
+# Map scene_l1 (CN) → D6 E# code.
+# scene_l1 categories don't perfectly line up with D6 (D6 is environment-centric;
+# scene_l1 mixes subject and environment). We only map the unambiguous ones —
+# subject-driven scene_l1s like 人类/动物活动场景 are dropped (returning no
+# D6 hit) because the actual D6 (室外/室内/建筑/…) depends on the scene
+# description, not the subject. This keeps coverage honest at the cost of
+# undercounting D6 — a known limitation flagged in the docs.
 _SCENE_L1_TO_D6 = {
-    "人类活动场景": "E1",     # too broad; map to "室外自然" as default
-    "动物活动场景": "E1",
-    "自然风景": "E1",
-    "常见事物": "E5",
-    "城市建筑": "E2",
-    "交通工具": "E9",
-    "室内环境": "E5",
-    "超现实场景": "E8",
+    "自然风景": "E1",      # 室外自然
+    "城市建筑": "E2",      # 建筑/城市
+    "室内环境": "E5",      # 室内
+    "常见事物": "E5",      # 物件多在室内
+    "交通工具": "E9",      # 交通/路面
+    "超现实场景": "E8",    # 超现实
 }
 
 

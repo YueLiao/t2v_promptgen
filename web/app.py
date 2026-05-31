@@ -408,7 +408,10 @@ def create_run(
             "base_url": base_url or None,
         }
 
-    # Try real LLM, fall back to mock — log loudly so silent failures are visible
+    # Try real LLM, fall back to mock — log loudly so silent failures are visible.
+    # Exception: BudgetExceededError must surface, NOT fall back to mock (otherwise
+    # the user gets fake data when they exceed their cap with no visible warning).
+    from ..llm.budget import BudgetExceededError
     try:
         _t0 = time.time()
         run.sl2_list, run.axes, run.recommended_tags = _try_real_dimensions(run_id, run)
@@ -419,6 +422,14 @@ def create_run(
         if not run.recommended_tags:
             run.recommended_tags = mock_data.default_recommended_tags(slug)
         run.original_ai_tags = {k: list(v) for k, v in run.recommended_tags.items()}
+    except BudgetExceededError as exc:
+        # Surface as a visible error and abort — do NOT mask with mock data.
+        msg = f"[预算已用满] {exc} —— 请提高 cost_usd_limit 或清零 cost_usd_used 后重试"
+        print(msg, flush=True)
+        RUN_LAST_ERROR[run_id] = msg
+        RUNS.pop(run_id, None)
+        RUN_CREDS.pop(run_id, None)
+        raise HTTPException(status_code=402, detail=msg)
     except Exception as exc:
         import traceback
         err = f"[P1 LLM 调用失败 → 走 mock] slug={slug}  {type(exc).__name__}: {exc}"
@@ -1323,14 +1334,20 @@ def _run_iterate_background(run_id: str, rejected_ids: list[str], refinement: st
         run.updated_at = datetime.now()
         _persist(run_id)
     except Exception as exc:
+        from ..llm.budget import BudgetExceededError
+        is_budget = isinstance(exc, BudgetExceededError)
         RUN_REWRITE_STATE[run_id] = {
             "status": "failed",
             "done": 0, "total": len(rejected_ids),
-            "result": {"error": f"{type(exc).__name__}: {exc}"},
+            "result": {
+                "error": str(exc) if is_budget else f"{type(exc).__name__}: {exc}",
+                "budget_exceeded": is_budget,
+            },
         }
         # P0-1 fix (iterate path): also advance phase so UI doesn't loop
         run.phase = Phase.P4_REVIEW
         run.updated_at = datetime.now()
+        _persist(run_id)
         print(f"[iterate-failed] run={run_id}: {exc}", flush=True)
 
 
@@ -1409,13 +1426,20 @@ def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_text: str
         return p1_confirm(run_id)
 
     run.p1_round += 1
+    from ..llm.budget import BudgetExceededError
     try:
         run.sl2_list, run.axes, new_rec = _try_real_dimensions(run_id, run, feedback=free_text)
         if not new_rec:
             new_rec = mock_data.default_recommended_tags(run.capability_slug)
         run.recommended_tags = new_rec
         run.original_ai_tags = {k: list(v) for k, v in new_rec.items()}
-    except Exception:
+    except BudgetExceededError as exc:
+        # Roll back the round bump, surface error, stay in P1 with old dims.
+        run.p1_round -= 1
+        RUN_LAST_ERROR[run_id] = f"[预算已用满 → 未重新生成] {exc}"
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+    except Exception as exc:
+        RUN_LAST_ERROR[run_id] = f"[P1 重生成失败 → 走 mock] {type(exc).__name__}: {exc}"
         run.sl2_list, run.axes = mock_data.generate_mock_dimensions(
             run.user_description, round=run.p1_round, feedback=free_text,
             capability_slug=run.capability_slug
@@ -1436,13 +1460,22 @@ def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_text: str
 def p1_confirm(run_id: str):
     run = _get_run(run_id)
 
+    from ..llm.budget import BudgetExceededError
+
     # ---- P2: generate prompts ----
     run.phase = Phase.P2_PROMPTS
     try:
         run.prompts = _try_real_prompts(run_id, run)
         if not run.prompts:
             raise RuntimeError("empty LLM response")
-    except Exception:
+    except BudgetExceededError as exc:
+        # Stay in P1, surface error so user can raise the cap & re-confirm.
+        run.phase = Phase.P1_DIMENSIONS
+        RUN_LAST_ERROR[run_id] = f"[预算已用满 → P2 未生成] {exc}"
+        run.updated_at = datetime.now()
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+    except Exception as exc:
+        RUN_LAST_ERROR[run_id] = f"[P2 失败 → 走 mock] {type(exc).__name__}: {exc}"
         run.prompts = mock_data.generate_mock_prompts(
             run.sl2_list, run.axes, run.target_set_size or 60
         )
@@ -1464,6 +1497,12 @@ def p1_confirm(run_id: str):
             "sl2_uncovered": report.sl2_uncovered,
             "judges_ran": report.judges_ran,
         }
+    except BudgetExceededError as exc:
+        # P2 produced prompts but P3 hit the cap — still let the user review,
+        # just record that QA didn't run.
+        RUN_QA_REPORTS[run_id] = {"error": str(exc), "judges_ran": False,
+                                    "budget_exceeded": True}
+        RUN_LAST_ERROR[run_id] = f"[预算已用满 → QA 跳过] {exc}"
     except Exception as e:
         # QA failed entirely — log but don't block the user
         RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
@@ -1478,6 +1517,7 @@ def p1_confirm(run_id: str):
 def p4_rerun_qa(run_id: str):
     """Re-run the QA pass on the current prompts. Useful after user edits."""
     run = _get_run(run_id)
+    from ..llm.budget import BudgetExceededError
     try:
         report = _try_real_qa(run_id, run)
         RUN_QA_REPORTS[run_id] = {
@@ -1493,6 +1533,10 @@ def p4_rerun_qa(run_id: str):
             "sl2_uncovered": report.sl2_uncovered,
             "judges_ran": report.judges_ran,
         }
+    except BudgetExceededError as exc:
+        RUN_QA_REPORTS[run_id] = {"error": str(exc), "judges_ran": False,
+                                    "budget_exceeded": True}
+        RUN_LAST_ERROR[run_id] = f"[预算已用满 → 重跑 QA 终止] {exc}"
     except Exception as e:
         RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
     run.updated_at = datetime.now()
@@ -1589,9 +1633,10 @@ async def download_prompts_format(run_id: str, fmt: str):
         raise HTTPException(400,
             f"unknown format {fmt!r}; supported: {list(FORMAT_INFO)}")
     if not run.prompts:
-        return Response(b"", media_type="text/plain",
+        info = FORMAT_INFO[fmt]
+        return Response(b"", media_type=info["content_type"],
                         headers={"Content-Disposition": _content_disposition(
-                            f"prompts_{run.capability_slug}_empty{FORMAT_INFO[fmt]['ext']}")})
+                            f"prompts_{run.capability_slug}_empty{info['ext']}")})
     body, ctype, ext = export(run.prompts, fmt)   # type: ignore[arg-type]
     name = f"prompts_{run.capability_slug}_{run.id}_{fmt}{ext}"
     return Response(body, media_type=ctype,

@@ -144,15 +144,21 @@ def _export_txt(prompts: list[PromptEntry], lang: Literal["zh", "en"]
 
 FORMAT_INFO = {
     "jsonl":       {"label": "测试用例(JSONL,主格式)", "ext": ".jsonl",
+                    "content_type": "application/x-jsonlines",
                     "desc": "原生格式,完整 schema,行内 JSON"},
     "csv":         {"label": "通用 CSV",            "ext": ".csv",
+                    "content_type": "text/csv; charset=utf-8",
                     "desc": "Excel/标注平台导入,带 BOM 兼容中文"},
     "vbench":      {"label": "VBench 兼容 CSV",     "ext": ".csv",
+                    "content_type": "text/csv; charset=utf-8",
                     "desc": "prompt_en + dimensions 两列,VBench 风格"},
     "evalcrafter": {"label": "EvalCrafter JSONL",  "ext": ".jsonl",
+                    "content_type": "application/x-jsonlines",
                     "desc": "{id, prompt, category} 简化 JSONL"},
     "txt":         {"label": "纯文本(中文)",       "ext": ".txt",
+                    "content_type": "text/plain; charset=utf-8",
                     "desc": "一行一条 prompt(zh),给老派评测员手填用"},
     "txt_en":      {"label": "纯文本(英文)",       "ext": ".txt",
+                    "content_type": "text/plain; charset=utf-8",
                     "desc": "一行一条 prompt(en)"},
 }

@@ -18,6 +18,7 @@ Usage:
 """
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable
 
 from ..core.schema import Run
@@ -57,13 +58,25 @@ PRICING_USD_PER_1M = {
 
 
 def estimate_cost(model: str, in_tokens: int, out_tokens: int) -> float:
-    """Estimate USD cost of one call. Returns 0 for unknown models."""
+    """Estimate USD cost of one call. Returns 0 for unknown models.
+
+    Lookup order:
+      1. Exact model name match.
+      2. `model` is a known model + hyphen-suffix (e.g. "deepseek-chat-0125"
+         matches "deepseek-chat"). Longest known key wins to avoid
+         "deepseek" accidentally matching "deepseek-reasoner-v2".
+    Unknown models / dated variants without an explicit entry return 0
+    (no enforcement) — add an explicit entry to PRICING_USD_PER_1M when
+    you ship a new provider.
+    """
+    if not model:
+        return 0.0
     pricing = PRICING_USD_PER_1M.get(model)
     if not pricing:
-        # Try suffix match (e.g. "moonshot-v1-128k" → "moonshot-v1-32k")
-        for known, p in PRICING_USD_PER_1M.items():
-            if model.startswith(known.rsplit("-", 1)[0]):
-                pricing = p
+        # Longest-key-first prefix match with explicit hyphen boundary
+        for known in sorted(PRICING_USD_PER_1M.keys(), key=len, reverse=True):
+            if model.startswith(known + "-"):
+                pricing = PRICING_USD_PER_1M[known]
                 break
     if not pricing:
         return 0.0
@@ -88,7 +101,29 @@ class BudgetedClient(LLMClient):
       run: the Run to charge against (uses cost_usd_used + cost_usd_limit)
       on_charge: optional callback called as on_charge(actual_usd) after
                  each successful call — lets the caller persist run state.
+
+    Thread safety: the read-modify-write of `run.cost_usd_used` is protected
+    by a per-run lock (keyed by `id(run)`), so concurrent background tasks
+    (judge + rewrite, etc.) on the same run can't lose updates.
     """
+
+    # Per-run locks keyed by id(run). Long-lived; cleared when the run object
+    # is garbage-collected. Acceptable because Run objects are pinned in RUNS.
+    _LOCKS: dict[int, threading.Lock] = {}
+    _LOCKS_GUARD = threading.Lock()
+
+    @classmethod
+    def _lock_for(cls, run: Run) -> threading.Lock:
+        key = id(run)
+        lk = cls._LOCKS.get(key)
+        if lk is not None:
+            return lk
+        with cls._LOCKS_GUARD:
+            lk = cls._LOCKS.get(key)
+            if lk is None:
+                lk = threading.Lock()
+                cls._LOCKS[key] = lk
+        return lk
 
     def __init__(self, inner: LLMClient, run: Run,
                  on_charge: Callable[[float], None] | None = None):
@@ -102,27 +137,35 @@ class BudgetedClient(LLMClient):
     def generate(self, messages: list[dict], json_schema: dict | None = None,
                  temperature: float = 0.3, max_tokens: int = 4096,
                  system: str | None = None) -> LLMResponse:
-        # Pre-call check
-        used = self.run.cost_usd_used
-        limit = self.run.cost_usd_limit
-        # Build full message list (with system) for size estimation
-        full_msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
-        estimated = estimate_call_upper_bound(self.model, max_tokens, full_msgs)
-        # Only enforce if model has known pricing (else estimated = 0 and we don't block)
-        if limit and limit > 0 and estimated > 0 and (used + estimated) > limit:
-            raise BudgetExceededError(used=used, limit=limit, estimated=estimated)
+        lock = self._lock_for(self.run)
+        # Pre-call check (read snapshot under lock so concurrent calls see
+        # consistent "used" totals when deciding to block).
+        with lock:
+            used = self.run.cost_usd_used
+            limit = self.run.cost_usd_limit
+            full_msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+            estimated = estimate_call_upper_bound(self.model, max_tokens, full_msgs)
+            # Only enforce if model has known pricing (else estimated = 0 and we don't block)
+            if limit and limit > 0 and estimated > 0 and (used + estimated) > limit:
+                raise BudgetExceededError(used=used, limit=limit, estimated=estimated)
 
+        # The LLM call itself is the slow part — don't hold the lock across it.
         resp = self.inner.generate(messages=messages, json_schema=json_schema,
                                     temperature=temperature, max_tokens=max_tokens,
                                     system=system)
 
-        # Post-call accounting
-        actual = estimate_cost(
+        # Post-call accounting. Prefer our local estimate (consistent with the
+        # pricing table used for the cap); if unknown model, fall back to
+        # whatever the provider reported (often non-zero for OpenAI/Anthropic).
+        local_est = estimate_cost(
             self.model,
             resp.usage.input_tokens,
             resp.usage.output_tokens,
         )
-        self.run.cost_usd_used = round(used + actual, 6)
+        provider_reported = getattr(resp.usage, "cost_usd", 0) or 0
+        actual = local_est if local_est > 0 else float(provider_reported)
+        with lock:
+            self.run.cost_usd_used = round(self.run.cost_usd_used + actual, 6)
         # Override cost_usd in usage so callers see real number
         if actual > 0:
             resp.usage.cost_usd = actual

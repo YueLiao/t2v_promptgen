@@ -313,3 +313,117 @@ def test_format_info_has_all_supported():
         body, ctype, ext = export([_pe()], fmt)     # type: ignore[arg-type]
         assert body
         assert ext.startswith(".")
+        # PR-7 review fix: FORMAT_INFO must expose content_type for the
+        # empty-prompt download path.
+        assert "content_type" in FORMAT_INFO[fmt]
+        assert ctype == FORMAT_INFO[fmt]["content_type"]
+
+
+# ============================================================================
+# PR-7 review-round fixes (regression tests)
+# ============================================================================
+
+def test_budget_unknown_model_falls_back_to_provider_cost():
+    """When local PRICING_USD_PER_1M doesn't know the model, charge whatever
+    the provider reported in usage.cost_usd instead of silently charging 0."""
+    from t2v_promptgen.llm.budget import BudgetedClient
+    run = _run()
+    run.cost_usd_limit = 100.0
+    stub = _StubClient(in_tokens=1000, out_tokens=2000,
+                       model="totally-novel-provider-xyz")
+    # Have the provider self-report a non-trivial cost
+    bc = BudgetedClient(stub, run=run)
+
+    # Patch the response usage to carry a provider cost
+    orig_generate = stub.generate
+    def gen_with_cost(**kw):
+        r = orig_generate(**kw)
+        r.usage.cost_usd = 0.005    # provider self-reported
+        return r
+    stub.generate = gen_with_cost
+
+    bc.generate(messages=[{"role": "user", "content": "x"}])
+    # Should have accumulated the provider's reported cost
+    assert run.cost_usd_used == 0.005
+
+
+def test_estimate_cost_no_false_match_across_model_families():
+    """A model name that shares only the first hyphen segment with a known
+    entry must NOT be priced under that entry."""
+    from t2v_promptgen.llm.budget import estimate_cost
+    # 'deepseek-reasoner-v2' shares 'deepseek' with 'deepseek-chat' but is a
+    # different family — old code matched it to chat pricing via prefix.
+    # New code requires startswith('known-') hyphen boundary.
+    c_chat = estimate_cost("deepseek-chat", 1_000_000, 1_000_000)
+    c_new = estimate_cost("deepseek-reasoner-v2", 1_000_000, 1_000_000)
+    # 'deepseek-reasoner-v2' should hit 'deepseek-reasoner' (longest prefix)
+    # NOT 'deepseek-chat'.
+    assert c_new != c_chat
+    # And it should be > 0 (matched deepseek-reasoner)
+    assert c_new > 0
+
+
+def test_estimate_cost_dated_suffix_matches_base_model():
+    """deepseek-chat-0125 → deepseek-chat (hyphen-suffix variant)."""
+    from t2v_promptgen.llm.budget import estimate_cost
+    base = estimate_cost("deepseek-chat", 1_000_000, 1_000_000)
+    dated = estimate_cost("deepseek-chat-0125", 1_000_000, 1_000_000)
+    assert dated == base
+
+
+def test_estimate_cost_truly_unknown_returns_zero():
+    """Provider with no shared prefix returns 0 (no enforcement, charge by usage)."""
+    from t2v_promptgen.llm.budget import estimate_cost
+    assert estimate_cost("acme-corp-llm-v1", 1_000_000, 1_000_000) == 0.0
+
+
+def test_coverage_d4_does_not_match_substring_in_unrelated_word():
+    """'推' should NOT match inside '推荐' — token list is longest-first."""
+    from t2v_promptgen.core.coverage import build_coverage_report
+    # camera_zh contains '推荐' but no actual camera-move keyword
+    prompts = [_pe("p1", camera_zh="导演推荐的镜头")]
+    r = build_coverage_report(_run(prompts=prompts))
+    d4 = next(d for d in r.dims if d.code == "D4")
+    by_code = {v.code: v.hit_count for v in d4.values}
+    # C2 (推) would have spuriously matched in the old greedy version
+    assert by_code.get("C2", 0) == 0
+
+
+def test_coverage_d4_prefers_longer_token():
+    """When both '推' and '推近' would match, the longer code wins exactly
+    once (longest match per prompt, no double-count)."""
+    from t2v_promptgen.core.coverage import build_coverage_report
+    prompts = [_pe("p1", camera_zh="镜头慢慢推近主体")]
+    r = build_coverage_report(_run(prompts=prompts))
+    d4 = next(d for d in r.dims if d.code == "D4")
+    total = sum(v.hit_count for v in d4.values)
+    # Exactly one D4 attribution for one camera move
+    assert total == 1
+
+
+def test_budget_concurrent_calls_use_lock():
+    """Concurrent generate() on the same run must not lose cost updates."""
+    import threading
+    from t2v_promptgen.llm.budget import BudgetedClient
+    run = _run()
+    run.cost_usd_limit = 100.0
+    stub = _StubClient(in_tokens=1000, out_tokens=2000)
+    bc = BudgetedClient(stub, run=run)
+
+    def hit():
+        bc.generate(messages=[{"role": "user", "content": "x"}])
+
+    threads = [threading.Thread(target=hit) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # All 20 calls should be accounted for
+    assert stub.calls == 20
+    # And cost should be ~20x single-call cost (no lost updates)
+    single = run.cost_usd_used / 20
+    assert single > 0    # sanity: per-call cost is non-zero
+    # Total should exactly equal 20 * single (no lost updates).
+    # Allow tiny float rounding via round(.., 6) accumulation drift.
+    assert abs(run.cost_usd_used - round(single * 20, 6)) < 1e-4
