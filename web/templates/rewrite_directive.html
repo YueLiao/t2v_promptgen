@@ -63,7 +63,7 @@
               </label>
             </div>
 
-            <div x-show="isSelected('{{ card.id }}')" x-cloak class="space-y-1.5 pl-6">
+            <div x-show="isSelected('{{ card.id }}')" x-cloak class="space-y-2 pl-6">
               {% for p in card.params %}
               <div>
                 <label class="text-xs text-slate-600">{{ p.label_zh }}</label>
@@ -75,6 +75,36 @@
                   <option value="{{ opt }}">{{ opt }}</option>
                   {% endfor %}
                 </select>
+                {% elif p.type == 'multi_enum' %}
+                <!-- Multi-select chip picker. Default ['__all__'] = all options;
+                     an empty list is also treated as 'all' by the backend. -->
+                <div class="mt-0.5">
+                  <div class="flex items-center gap-2 mb-1">
+                    <button type="button"
+                            @click="setMultiAll('{{ card.id }}', '{{ p.key }}')"
+                            :class="isMultiAll('{{ card.id }}', '{{ p.key }}', {{ p.options|tojson }}) ? 'bg-orange-500 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+                            class="text-xs px-2 py-0.5 rounded">
+                      🎲 随机全部
+                    </button>
+                    <button type="button"
+                            @click="setMultiClear('{{ card.id }}', '{{ p.key }}')"
+                            class="text-xs text-slate-500 hover:text-slate-800">清空</button>
+                    <span class="text-xs text-slate-400">
+                      已选 <span x-text="getMultiSelected('{{ card.id }}', '{{ p.key }}', {{ p.options|tojson }}).length"></span>
+                      / {{ p.options|length }}
+                    </span>
+                  </div>
+                  <div class="flex flex-wrap gap-1">
+                    {% for opt in p.options %}
+                    <button type="button"
+                            @click="toggleMulti('{{ card.id }}', '{{ p.key }}', '{{ opt }}', {{ p.options|tojson }})"
+                            :class="isMultiPicked('{{ card.id }}', '{{ p.key }}', '{{ opt }}', {{ p.options|tojson }}) ? 'bg-orange-100 border-orange-400 text-orange-800' : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50'"
+                            class="text-xs border rounded px-2 py-0.5">
+                      {{ opt }}
+                    </button>
+                    {% endfor %}
+                  </div>
+                </div>
                 {% else %}
                 <input type="text"
                        x-bind:value="getParam('{{ card.id }}', '{{ p.key }}', '{{ p.default }}')"
@@ -177,6 +207,59 @@ function directivePanel(initialTransforms, initialFreeText, cardsUi) {
       const t = this.selectedTransforms.find(x => x.id === cardId);
       // P1-3: respect already-set value (incl. hydrated from server)
       return (t && t.params[key] !== undefined) ? t.params[key] : fallback;
+    },
+
+    // --- multi_enum helpers ---
+    // Default ['__all__'] sentinel means "pick from all options". We render
+    // "随机全部" as the selected state in that case (so the user sees all
+    // chips highlighted). Toggling any chip switches to an explicit subset.
+    _getList(cardId, key) {
+      const t = this.selectedTransforms.find(x => x.id === cardId);
+      const v = t && t.params[key];
+      if (Array.isArray(v)) return v;
+      if (typeof v === 'string') return [v];
+      return ['__all__'];
+    },
+    getMultiSelected(cardId, key, allOptions) {
+      const v = this._getList(cardId, key);
+      if (v.includes('__all__') || v.length === 0) return allOptions;
+      return v.filter(x => allOptions.includes(x));
+    },
+    isMultiPicked(cardId, key, opt, allOptions) {
+      return this.getMultiSelected(cardId, key, allOptions).includes(opt);
+    },
+    isMultiAll(cardId, key, allOptions) {
+      const v = this._getList(cardId, key);
+      if (v.includes('__all__')) return true;
+      // Also "all" if every option is in the subset
+      return allOptions.length > 0 && allOptions.every(o => v.includes(o));
+    },
+    setMultiAll(cardId, key) {
+      this.setParam(cardId, key, ['__all__']);
+    },
+    setMultiClear(cardId, key) {
+      // Empty list is treated as "all" by backend (forgiving UX);
+      // here we send an explicit empty array so UI shows zero chips lit.
+      this.setParam(cardId, key, []);
+    },
+    toggleMulti(cardId, key, opt, allOptions) {
+      const current = this.getMultiSelected(cardId, key, allOptions);
+      let next;
+      if (current.includes(opt)) {
+        next = current.filter(x => x !== opt);
+      } else {
+        // If currently __all__, switch to explicit list excluding nothing first,
+        // then we'd be adding — but if already all included, removing one is
+        // the natural "deselect" path.
+        next = [...current, opt];
+      }
+      // Special: if next ends up being the full set, store __all__ sentinel
+      // so the "随机全部" button shows as active.
+      if (allOptions.every(o => next.includes(o))) {
+        this.setParam(cardId, key, ['__all__']);
+      } else {
+        this.setParam(cardId, key, next);
+      }
     },
     isValid() {
       return this.selectedTransforms.length > 0 || this.freeText.trim().length > 0;
