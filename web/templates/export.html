@@ -34,6 +34,51 @@
         <span class="text-orange-600 text-sm">下载 ↓</span>
       </a>
 
+      <!-- Multi-format export menu -->
+      <details class="border border-slate-200 rounded-lg">
+        <summary class="cursor-pointer p-3 hover:bg-slate-50 select-none">
+          <span class="font-medium text-slate-900">其他格式导出</span>
+          <span class="text-xs text-slate-500 ml-2">VBench / EvalCrafter / CSV / TXT</span>
+        </summary>
+        <div class="border-t border-slate-200 divide-y divide-slate-100">
+          <a href="/runs/{{ run.id }}/download/prompts.csv" class="flex items-center justify-between p-3 hover:bg-slate-50">
+            <div>
+              <div class="text-sm text-slate-700">通用 CSV</div>
+              <div class="text-xs text-slate-500">Excel / 标注平台导入,带 BOM 兼容中文</div>
+            </div>
+            <span class="text-orange-600 text-xs">↓</span>
+          </a>
+          <a href="/runs/{{ run.id }}/download/prompts.vbench" class="flex items-center justify-between p-3 hover:bg-slate-50">
+            <div>
+              <div class="text-sm text-slate-700">VBench 兼容 CSV</div>
+              <div class="text-xs text-slate-500">prompt_en + dimensions 两列</div>
+            </div>
+            <span class="text-orange-600 text-xs">↓</span>
+          </a>
+          <a href="/runs/{{ run.id }}/download/prompts.evalcrafter" class="flex items-center justify-between p-3 hover:bg-slate-50">
+            <div>
+              <div class="text-sm text-slate-700">EvalCrafter JSONL</div>
+              <div class="text-xs text-slate-500">{id, prompt, category} 简化格式</div>
+            </div>
+            <span class="text-orange-600 text-xs">↓</span>
+          </a>
+          <a href="/runs/{{ run.id }}/download/prompts.txt" class="flex items-center justify-between p-3 hover:bg-slate-50">
+            <div>
+              <div class="text-sm text-slate-700">纯文本(中文)</div>
+              <div class="text-xs text-slate-500">一行一条,给手填评测员</div>
+            </div>
+            <span class="text-orange-600 text-xs">↓</span>
+          </a>
+          <a href="/runs/{{ run.id }}/download/prompts.txt_en" class="flex items-center justify-between p-3 hover:bg-slate-50">
+            <div>
+              <div class="text-sm text-slate-700">纯文本(英文)</div>
+              <div class="text-xs text-slate-500">一行一条,英文 prompt</div>
+            </div>
+            <span class="text-orange-600 text-xs">↓</span>
+          </a>
+        </div>
+      </details>
+
       {% if run.source == 'rewrite' %}
       <a href="/runs/{{ run.id }}/download/rewrite_diff.jsonl" class="flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition">
         <div>

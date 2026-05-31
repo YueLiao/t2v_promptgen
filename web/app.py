@@ -48,6 +48,25 @@ RUNS: dict[str, Run] = {}
 RUN_CREDS: dict[str, dict] = {}
 
 
+def _wrap_budget(client, run_id: str):
+    """Wrap a raw LLM client with per-run budget enforcement.
+
+    The wrapper raises BudgetExceededError before calls that would push
+    cost_usd_used past cost_usd_limit. Successful calls accumulate the
+    actual cost back into run.cost_usd_used and persist.
+    """
+    from ..llm.budget import BudgetedClient
+    run = RUNS.get(run_id)
+    if run is None:
+        return client
+    def _save(_delta):
+        try:
+            _persist(run_id)
+        except Exception:
+            pass
+    return BudgetedClient(client, run=run, on_charge=_save)
+
+
 def _persist(run_id: str) -> None:
     """Save run + its side-state to SQLite. Called after any mutation.
 
@@ -122,6 +141,7 @@ def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
         api_key=creds["api_key"],
         base_url=creds.get("base_url") or None,
     )
+    client = _wrap_budget(client, run_id)
     return llm_phases.generate_dimensions_real(
         description=run.user_description or "",
         client=client,
@@ -146,6 +166,7 @@ def _try_judge_dimensions(run_id: str, run: Run):
                 api_key=creds["api_key"],
                 base_url=creds.get("base_url") or None,
             )
+            client = _wrap_budget(client, run_id)
         except Exception as exc:
             print(f"[P1 judge client build failed] {exc}", flush=True)
     try:
@@ -187,6 +208,7 @@ def _try_real_prompts(run_id: str, run: Run):
         api_key=creds["api_key"],
         base_url=creds.get("base_url") or None,
     )
+    client = _wrap_budget(client, run_id)
     return llm_phases.generate_prompts_real(
         capability=run.capability_slug,
         sl2_list=run.sl2_list,
@@ -213,6 +235,7 @@ def _try_real_qa(run_id: str, run: Run):
             api_key=creds["api_key"],
             base_url=creds.get("base_url") or None,
         )
+        client = _wrap_budget(client, run_id)
     return llm_phases.run_qa_real(
         prompts=run.prompts,
         sl2_list=run.sl2_list,
@@ -333,6 +356,7 @@ def create_run(
     model_p2: str = Form("deepseek-chat"),         # prompt 生成(速度,多批次)
     api_key: str = Form(""),
     base_url: str = Form(""),
+    cost_usd_limit: float = Form(5.0),             # 0 = unlimited
 ):
     run_id = str(uuid.uuid4())[:8]
     now = datetime.now()
@@ -370,6 +394,7 @@ def create_run(
         user_description=description,
         provider=provider,
         model=f"{model_p1} / {model_p2}",        # display-only
+        cost_usd_limit=max(0.0, float(cost_usd_limit or 0)),
     )
 
     # Store credentials for this run (memory only)
@@ -433,8 +458,10 @@ async def view_run(request: Request, run_id: str):
     extra = {}
     if run.phase == Phase.P4_REVIEW:
         from .mock_data import compute_coverage_matrix
+        from ..core.coverage import build_coverage_report
         extra["coverage"] = compute_coverage_matrix(run.prompts, run.sl2_list, run.axes)
         extra["qa_report"] = RUN_QA_REPORTS.get(run_id, {})
+        extra["coverage_8d"] = build_coverage_report(run)
         # For rewrite runs, build {prompt_id: SourcePrompt} for diff view
         if run.source == "rewrite":
             sp_by_id = {sp.source_id: sp for sp in run.source_prompts}
@@ -965,6 +992,7 @@ def rewrite_start(run_id: str, background_tasks: BackgroundTasks):
         api_key=creds["api_key"],
         base_url=creds.get("base_url") or None,
     )
+    client = _wrap_budget(client, run_id)
 
     eligible = [p for p in run.source_prompts if p.selected and not p.failed_to_rewrite]
     if run.rewrite_directive.selected_source_ids:
@@ -1037,12 +1065,22 @@ def _run_rewrite_background(run_id: str, client):
         run.updated_at = datetime.now()
         _persist(run_id)    # bg-task path bypasses middleware, so persist explicitly
     except Exception as exc:
+        # Detect budget exceedance for clearer messaging
+        from ..llm.budget import BudgetExceededError
+        is_budget = isinstance(exc, BudgetExceededError)
         RUN_REWRITE_STATE[run_id] = {
             "status": "failed",
             "done": _progress_done(run_id),
             "total": RUN_REWRITE_STATE.get(run_id, {}).get("total", 0),
-            "result": {"error": f"{type(exc).__name__}: {exc}"},
+            "result": {
+                "error": str(exc) if is_budget else f"{type(exc).__name__}: {exc}",
+                "budget_exceeded": is_budget,
+            },
         }
+        # P0-1 fix: advance phase even on background failure
+        run.phase = Phase.P4_REVIEW
+        run.updated_at = datetime.now()
+        _persist(run_id)
         print(f"[rewrite-failed] run={run_id}: {exc}", flush=True)
 
 
@@ -1240,6 +1278,7 @@ async def rewrite_iterate(run_id: str, request: Request, background_tasks: Backg
         api_key=creds["api_key"],
         base_url=creds.get("base_url") or None,
     )
+    client = _wrap_budget(client, run_id)
 
     run.phase = Phase.P3_QA
     run.updated_at = datetime.now()
@@ -1538,6 +1577,24 @@ async def download_prompts(run_id: str):
     body = "\n".join(lines)
     name = f"prompts_{run.capability_slug}_v{run.inherited_from_version or 1}.jsonl"
     return Response(body, media_type="application/x-jsonlines",
+                    headers={"Content-Disposition": _content_disposition(name)})
+
+
+@app.get("/runs/{run_id}/download/prompts.{fmt}")
+async def download_prompts_format(run_id: str, fmt: str):
+    """Multi-format export. fmt ∈ {jsonl, csv, vbench, evalcrafter, txt, txt_en}."""
+    from ..core.exporters import export, FORMAT_INFO
+    run = _get_run(run_id)
+    if fmt not in FORMAT_INFO:
+        raise HTTPException(400,
+            f"unknown format {fmt!r}; supported: {list(FORMAT_INFO)}")
+    if not run.prompts:
+        return Response(b"", media_type="text/plain",
+                        headers={"Content-Disposition": _content_disposition(
+                            f"prompts_{run.capability_slug}_empty{FORMAT_INFO[fmt]['ext']}")})
+    body, ctype, ext = export(run.prompts, fmt)   # type: ignore[arg-type]
+    name = f"prompts_{run.capability_slug}_{run.id}_{fmt}{ext}"
+    return Response(body, media_type=ctype,
                     headers={"Content-Disposition": _content_disposition(name)})
 
 

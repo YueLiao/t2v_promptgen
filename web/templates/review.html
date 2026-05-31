@@ -526,5 +526,57 @@ function rewriteReview() {
 
   {% endif %}  {# end source == 'rewrite' branch #}
 
+  <!-- 8-dim coverage panel (shared by both modes) -->
+  {% if coverage_8d %}
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+    <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+      <div>
+        <h3 class="text-lg font-bold text-slate-900">8 维标签覆盖</h3>
+        <p class="text-xs text-slate-500">
+          每条 prompt 实际覆盖了哪些 tag · 灰色 = 未计划 / 蓝色 = 计划但未命中 / 绿色 = 命中
+          {% if coverage_8d.gaps_count %} · <span class="text-amber-700">⚠ {{ coverage_8d.gaps_count }} 个空缺</span>{% endif %}
+        </p>
+      </div>
+      <div class="text-xs text-slate-500">共 {{ coverage_8d.total_prompts }} 条 prompt</div>
+    </div>
+    <div class="divide-y divide-slate-100">
+      {% for d in coverage_8d.dims %}
+      {% if d.values|selectattr('planned')|list|length > 0 or d.values|selectattr('hit_count')|list|length > 0 %}
+      <div class="px-6 py-3">
+        <div class="flex items-center gap-3 mb-2">
+          <span class="text-sm font-semibold text-slate-900">{{ d.code }} {{ d.name_zh }}</span>
+          <span class="text-xs text-slate-500">
+            计划 {{ d.planned_count }} 个值
+            {% if d.countable %}
+            · 实际命中 {{ d.hit_count }} 个 · 覆盖 {{ d.total_prompts_hit }} 条 prompt
+            {% else %}
+            · (本维度无法从产物文本反推命中)
+            {% endif %}
+          </span>
+        </div>
+        <div class="flex flex-wrap gap-1">
+          {% for v in d.values %}
+          {% set has_hit = v.hit_count > 0 %}
+          {% set show = v.planned or has_hit %}
+          {% if show %}
+          <span class="text-xs px-2 py-1 rounded border inline-flex items-center gap-1"
+                title="planned={{ v.planned }} hits={{ v.hit_count }}"
+                {% if has_hit %}style="background: linear-gradient(90deg, #d1fae5 {{ (v.hit_count / coverage_8d.total_prompts * 100)|round }}%, white 0)"{% endif %}
+                class="{% if has_hit %}border-green-300 text-green-800
+                        {% elif v.planned %}border-blue-300 text-blue-800 bg-blue-50
+                        {% else %}border-slate-200 text-slate-500{% endif %}">
+            <span>{{ v.code }} {{ v.name_zh }}</span>
+            {% if has_hit %}<span class="font-bold">×{{ v.hit_count }}</span>{% endif %}
+          </span>
+          {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
 </div>  {# end x-data container #}
 {% endblock %}

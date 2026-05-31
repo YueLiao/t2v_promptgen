@@ -37,9 +37,24 @@
         <h1 class="text-xl font-bold text-slate-900">{{ run.capability_slug }}</h1>
         <p class="text-sm text-slate-500">任务编号: <code class="bg-slate-100 px-1 rounded">{{ run.id }}</code> · 创建于 {{ run.created_at.strftime("%Y-%m-%d %H:%M") }}</p>
       </div>
-      <div class="text-sm text-slate-600">
-        服务: <span class="font-mono text-slate-800">{{ run.provider }}</span> ·
-        <span class="font-mono text-slate-800 text-xs">{{ run.model }}</span>
+      <div class="text-sm text-slate-600 text-right">
+        <div>
+          服务: <span class="font-mono text-slate-800">{{ run.provider }}</span> ·
+          <span class="font-mono text-slate-800 text-xs">{{ run.model }}</span>
+        </div>
+        {% if run.cost_usd_limit %}
+        {% set pct = (run.cost_usd_used / run.cost_usd_limit * 100) if run.cost_usd_limit else 0 %}
+        <div class="text-xs mt-0.5">
+          预算:
+          <span class="font-mono
+            {% if pct >= 90 %}text-red-600 font-bold
+            {% elif pct >= 70 %}text-amber-600
+            {% else %}text-slate-700{% endif %}">
+            ${{ "%.4f"|format(run.cost_usd_used) }} / ${{ "%.2f"|format(run.cost_usd_limit) }}
+            ({{ "%.0f"|format(pct) }}%)
+          </span>
+        </div>
+        {% endif %}
       </div>
     </div>
     <!-- Phase tracker (completed phases are clickable to go back) -->
