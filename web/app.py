@@ -36,16 +36,79 @@ from .llm_routes import router as llm_router
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).parent
-app = FastAPI(title="t2v_promptgen", version="0.7")
+app = FastAPI(title="t2v_promptgen", version="0.8")
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 app.include_router(llm_router)
 
-# In-memory store
+# In-memory store (rebuilt from SQLite on startup)
 RUNS: dict[str, Run] = {}
 
-# Per-run credentials (never persisted, never returned via API)
+# Per-run credentials (persisted iff T2V_PERSIST_CREDS != 0)
 RUN_CREDS: dict[str, dict] = {}
+
+
+def _persist(run_id: str) -> None:
+    """Save run + its side-state to SQLite. Called after any mutation.
+
+    Best-effort: persistence failures don't break the request.
+    """
+    from ..core.persistence import save_run
+    run = RUNS.get(run_id)
+    if run is None:
+        return
+    save_run(
+        run,
+        creds=RUN_CREDS.get(run_id),
+        qa_report=RUN_QA_REPORTS.get(run_id),
+        dim_critique=RUN_DIM_CRITIQUE.get(run_id),
+        intake=RUN_INTAKE.get(run_id),
+        last_error=RUN_LAST_ERROR.get(run_id),
+    )
+
+
+_RUN_ID_PATH_RE = re.compile(r"/runs/([a-f0-9]+)|/rewrite/([a-f0-9]+)/")
+
+
+@app.middleware("http")
+async def _autopersist_middleware(request: Request, call_next):
+    """Auto-save mutated runs after non-GET requests.
+
+    Extracts run_id from the URL path and triggers _persist() after the
+    response is generated. This avoids sprinkling _persist() at every
+    mutation site. Background-task routes (e.g. /rewrite/{id}/start)
+    schedule additional saves inside the background task itself.
+    """
+    response = await call_next(request)
+    if request.method != "GET" and response.status_code < 400:
+        m = _RUN_ID_PATH_RE.search(request.url.path)
+        if m:
+            run_id = m.group(1) or m.group(2)
+            if run_id and run_id in RUNS:
+                try:
+                    _persist(run_id)
+                except Exception as exc:
+                    print(f"[autopersist] failed for {run_id}: {exc}", flush=True)
+    return response
+
+
+@app.on_event("startup")
+def _load_persisted_runs():
+    """Rehydrate RUNS + side dicts from SQLite."""
+    from ..core.persistence import list_runs
+    for run, extras in list_runs():
+        RUNS[run.id] = run
+        if "creds" in extras:
+            RUN_CREDS[run.id] = extras["creds"]
+        if "qa_report" in extras:
+            RUN_QA_REPORTS[run.id] = extras["qa_report"]
+        if "dim_critique" in extras:
+            RUN_DIM_CRITIQUE[run.id] = extras["dim_critique"]
+        if "intake" in extras:
+            RUN_INTAKE[run.id] = extras["intake"]
+        if "last_error" in extras:
+            RUN_LAST_ERROR[run.id] = extras["last_error"]
+    print(f"[persistence] loaded {len(RUNS)} runs from SQLite", flush=True)
 
 
 def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
@@ -108,9 +171,9 @@ def _run_dim_judge_background(run_id: str):
     run = RUNS.get(run_id)
     if not run:
         return
-    # Mark as pending so UI knows to show spinner
     RUN_DIM_CRITIQUE[run_id] = {"pending": True}
     RUN_DIM_CRITIQUE[run_id] = _try_judge_dimensions(run_id, run)
+    _persist(run_id)
 
 
 def _try_real_prompts(run_id: str, run: Run):
@@ -972,6 +1035,7 @@ def _run_rewrite_background(run_id: str, client):
             },
         }
         run.updated_at = datetime.now()
+        _persist(run_id)    # bg-task path bypasses middleware, so persist explicitly
     except Exception as exc:
         RUN_REWRITE_STATE[run_id] = {
             "status": "failed",
@@ -1218,6 +1282,7 @@ def _run_iterate_background(run_id: str, rejected_ids: list[str], refinement: st
         }
         run.phase = Phase.P4_REVIEW
         run.updated_at = datetime.now()
+        _persist(run_id)
     except Exception as exc:
         RUN_REWRITE_STATE[run_id] = {
             "status": "failed",
@@ -1599,7 +1664,7 @@ async def download_coverage(run_id: str):
 # ---------------------------------------------------------------------------
 
 def _cleanup_run_state(run_id: str) -> None:
-    """P0-4: clean every state dict that may reference run_id.
+    """P0-4: clean every state dict that may reference run_id, AND the DB row.
 
     Centralized so adding new state dicts doesn't risk leaks.
     """
@@ -1607,6 +1672,67 @@ def _cleanup_run_state(run_id: str) -> None:
               RUN_REWRITE_CANCEL, RUN_QA_REPORTS, RUN_DIM_CRITIQUE,
               RUN_LAST_ERROR, RUN_INTAKE):
         d.pop(run_id, None)
+    # Wipe the DB row too
+    try:
+        from ..core.persistence import delete_run as _db_delete
+        _db_delete(run_id)
+    except Exception as exc:
+        print(f"[persistence] delete_run({run_id}) failed: {exc}", flush=True)
+
+
+@app.post("/runs/{run_id}/clone")
+def clone_run(run_id: str):
+    """Clone a run's design (SL2 + axes + tags + config) into a fresh run
+    sitting at P1_DIMENSIONS. User can review + tweak before generating.
+
+    For rewrite runs, the directive is copied too (but not source_prompts —
+    those are bound to a specific uploaded file).
+    """
+    src = _get_run(run_id)
+
+    new_id = str(uuid.uuid4())[:8]
+    now = datetime.now()
+
+    # Clone everything design-relevant; reset everything output-related
+    new_run = Run(
+        id=new_id,
+        capability_slug=src.capability_slug,
+        created_at=now,
+        updated_at=now,
+        phase=Phase.P1_DIMENSIONS,
+        user_description=(src.user_description or "") + f"\n[clone of {src.id}]",
+        inherited_from_version=src.inherited_from_version,
+        sl2_list=[s.model_copy() for s in src.sl2_list],
+        axes=[a.model_copy() for a in src.axes],
+        recommended_tags={k: list(v) for k, v in src.recommended_tags.items()},
+        original_ai_tags={k: list(v) for k, v in src.original_ai_tags.items()},
+        custom_tags={k: [dict(c) for c in v] for k, v in src.custom_tags.items()},
+        target_set_size=src.target_set_size,
+        provider=src.provider,
+        model=src.model,
+        source=src.source,
+        # rewrite-source fields: directive carries but file/prompts don't
+        rewrite_directive=src.rewrite_directive.model_copy() if src.rewrite_directive else None,
+        # NOT copied: prompts, source_file, source_prompts, rewrite_round,
+        # p1_round, p4_round (start fresh)
+    )
+    RUNS[new_id] = new_run
+
+    # Copy creds (so user doesn't have to re-enter)
+    if run_id in RUN_CREDS:
+        RUN_CREDS[new_id] = dict(RUN_CREDS[run_id])
+
+    # Copy intake info (slug judgment)
+    if run_id in RUN_INTAKE:
+        RUN_INTAKE[new_id] = dict(RUN_INTAKE[run_id])
+
+    _persist(new_id)
+    # Land user on the dimensions page (R1 for rewrite — but cloned rewrite has
+    # no source file, so steer to upload page instead in that case)
+    if new_run.source == "rewrite":
+        # Rewrite clone: directive carries but they need a fresh file
+        return RedirectResponse("/rewrite/upload", status_code=303)
+    return RedirectResponse(f"/runs/{new_id}", status_code=303)
 
 
 @app.post("/runs/{run_id}/delete")

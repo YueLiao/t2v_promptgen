@@ -190,6 +190,9 @@
         <td class="px-6 py-3 text-sm text-slate-500">{{ r.updated_at.strftime("%m-%d %H:%M") }}</td>
         <td class="px-6 py-3 text-right">
           <a href="/runs/{{ r.id }}" class="text-orange-600 hover:underline text-sm font-medium">查看 →</a>
+          <form method="POST" action="/runs/{{ r.id }}/clone" class="inline ml-3">
+            <button type="submit" class="text-emerald-600 hover:underline text-xs" title="复制本任务的检查项+变量+标签设计,生成一个新任务从 P1 开始">复制</button>
+          </form>
           <form method="POST" action="/runs/{{ r.id }}/delete" class="inline ml-3" onsubmit="return confirm('确认删除这个任务?')">
             <button type="submit" class="text-red-500 hover:underline text-xs">删除</button>
           </form>
