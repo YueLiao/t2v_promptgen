@@ -1,28 +1,33 @@
 """Command-line entry point — automation / CI integration.
 
-Examples:
+Invoke with `python -m t2v_promptgen.cli <subcmd>` (no console-script
+shim is installed — there is no pyproject.toml/setup.py packaging in
+this prototype).
+
+Examples (run from the repo root):
     # End-to-end: take description → produce prompts + manifest
-    t2v-promptgen create --description="测试视频里人手细节" \\
+    python -m t2v_promptgen.cli create \\
+        --description="测试视频里人手细节" \\
         --size=60 --provider=deepseek --api-key=sk-... \\
         --out=./out --seed=42
 
     # List all stored runs
-    t2v-promptgen list
+    python -m t2v_promptgen.cli list
 
     # Show one run's metadata (JSON)
-    t2v-promptgen show abc12345
+    python -m t2v_promptgen.cli show abc12345
 
     # Clone an existing run's design (skips re-generation)
-    t2v-promptgen clone abc12345 --size=80
+    python -m t2v_promptgen.cli clone abc12345 --size=80
 
     # Re-export an existing run
-    t2v-promptgen export abc12345 --out=./out/
+    python -m t2v_promptgen.cli export abc12345 --out=./out/
 
     # Delete
-    t2v-promptgen delete abc12345
+    python -m t2v_promptgen.cli delete abc12345
 
     # DB stats
-    t2v-promptgen stats
+    python -m t2v_promptgen.cli stats
 
 Every create/export pairs the prompts file with a manifest.json
 containing tool version, LLM model id, --seed, tag-taxonomy hash, and

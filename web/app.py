@@ -93,28 +93,44 @@ _RUN_ID_PATH_RE = re.compile(r"/runs/([a-f0-9]+)|/rewrite/([a-f0-9]+)/")
 async def _autopersist_middleware(request: Request, call_next):
     """Auto-save mutated runs after non-GET requests.
 
-    Extracts run_id from the URL path and triggers _persist() after the
-    response is generated. This avoids sprinkling _persist() at every
-    mutation site. Background-task routes (e.g. /rewrite/{id}/start)
-    schedule additional saves inside the background task itself.
+    Persists in a `finally` regardless of HTTP status: a 5xx mid-request
+    still leaves real mutations on the Run object (e.g. partial bulk
+    delete) — losing those silently is worse than persisting a partially-
+    advanced state. The view function's own try/except decides what the
+    correct end state is.
     """
-    response = await call_next(request)
-    if request.method != "GET" and response.status_code < 400:
-        m = _RUN_ID_PATH_RE.search(request.url.path)
-        if m:
-            run_id = m.group(1) or m.group(2)
-            if run_id and run_id in RUNS:
-                try:
-                    _persist(run_id)
-                except Exception as exc:
-                    print(f"[autopersist] failed for {run_id}: {exc}", flush=True)
-    return response
+    run_id: str | None = None
+    m = _RUN_ID_PATH_RE.search(request.url.path)
+    if m:
+        run_id = m.group(1) or m.group(2)
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        # Persist on any non-GET, regardless of response status (or exception)
+        if request.method != "GET" and run_id and run_id in RUNS:
+            try:
+                _persist(run_id)
+                # S3: a successful 2xx mutation clears stale "last error".
+                # (4xx/5xx leaves it alone so user sees what just failed.)
+                if response is not None and 200 <= response.status_code < 300:
+                    RUN_LAST_ERROR.pop(run_id, None)
+            except Exception as exc:
+                print(f"[autopersist] failed for {run_id}: {exc}", flush=True)
 
 
 @app.on_event("startup")
 def _load_persisted_runs():
-    """Rehydrate RUNS + side dicts from SQLite."""
-    from ..core.persistence import list_runs
+    """Rehydrate RUNS + side dicts from SQLite.
+
+    P1-12: also audit for runs stuck in transient phases (P3_QA with no
+    background task to resume them — only possible after a server restart
+    mid-rewrite). Flip those to P4_REVIEW with a clear error message so
+    the UI doesn't trap the user on generating.html forever.
+    """
+    from ..core.persistence import list_runs, save_run
+    stuck = 0
     for run, extras in list_runs():
         RUNS[run.id] = run
         if "creds" in extras:
@@ -127,7 +143,23 @@ def _load_persisted_runs():
             RUN_INTAKE[run.id] = extras["intake"]
         if "last_error" in extras:
             RUN_LAST_ERROR[run.id] = extras["last_error"]
-    print(f"[persistence] loaded {len(RUNS)} runs from SQLite", flush=True)
+        # Rescue transient-phase runs: P3_QA implies an active LLM batch
+        # that we just lost. RUN_REWRITE_STATE is in-memory only, so on
+        # restart any P3 run is by definition orphaned.
+        if run.phase == Phase.P3_QA:
+            run.phase = Phase.P4_REVIEW
+            run.updated_at = datetime.now()
+            RUN_LAST_ERROR[run.id] = (
+                "[改写中断] 服务在改写过程中重启,本批未完成的产物已丢弃。"
+                "请到审核页确认现有结果,或回 R2 重新发起。"
+            )
+            try:
+                save_run(run, last_error=RUN_LAST_ERROR[run.id])
+            except Exception:
+                pass
+            stuck += 1
+    print(f"[persistence] loaded {len(RUNS)} runs from SQLite "
+          f"({stuck} rescued from stuck P3_QA)", flush=True)
 
 
 def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
@@ -507,13 +539,18 @@ async def view_run(request: Request, run_id: str):
 def goto_phase(run_id: str, target: str):
     """Jump back to an earlier phase, clearing forward state.
 
-    Going back to:
-    - P1_DIMENSIONS: keep slug + sl2_list + axes (user can edit on dim page),
-      clear prompts + QA — they'll be regenerated.
-    - P2_PROMPTS: same as P1 — there's no standalone P2 page, so this lands
-      on the dimensions confirm flow.
-    - P3_QA: keep prompts, clear QA reports — re-runs P3 immediately.
-    - P4_REVIEW: keep everything (from P5 only).
+    Generate runs:
+      - P1_DIMENSIONS: keep slug + sl2_list + axes (user can edit), clear
+        prompts + QA.
+      - P3_QA: keep prompts, re-run QA immediately.
+      - P4_REVIEW: keep everything (from P5 only).
+
+    Rewrite runs use a different phase semantics (P0=upload, P1=map,
+    P2=directive, P3=rewriting, P4=review). Going back from P4 to P1
+    on a rewrite run means "remap fields", which would orphan the
+    existing source_prompts (different keys) and invalidate the
+    rewrite_directive. We block that path and tell the user to start
+    over (delete the run and re-upload).
     """
     run = _get_run(run_id)
     try:
@@ -533,6 +570,24 @@ def goto_phase(run_id: str, target: str):
         # No-op, but harmless
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
+    # ----- Rewrite-mode handling -----
+    if run.source == "rewrite":
+        # Allowed: P4 ↔ P3 (rerun rewrite for selected subset is handled by
+        # the iterate flow, not goto). P5 → P4 (just unwind export view).
+        # Blocked: anything that would invalidate source_prompts / directive.
+        if target_idx <= PHASE_ORDER.index(Phase.P2_PROMPTS):
+            raise HTTPException(
+                400,
+                "改写任务不支持回退到字段映射或上传步骤 — "
+                "请删除当前任务,从「改写已有 prompt」重新上传。",
+            )
+        # P5_EXPORT → P4_REVIEW (or stay at P4): just walk the phase back,
+        # don't touch prompts (they're the rewrite outputs).
+        run.phase = target_phase
+        run.updated_at = datetime.now()
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+    # ----- Generate-mode handling -----
     # Discard forward state based on how far we're going back
     if target_idx <= PHASE_ORDER.index(Phase.P1_DIMENSIONS):
         # Going back to P1 or earlier — discard prompts + qa
@@ -1999,12 +2054,46 @@ async def download_rewrite_diff(run_id: str):
 
 @app.get("/runs/{run_id}/download/coverage.json")
 async def download_coverage(run_id: str):
+    """Legacy SL2 × axes coverage matrix (per-check-item hit counts)."""
     run = _get_run(run_id)
     return JSONResponse(
         mock_data.compute_coverage_matrix(run.prompts, run.sl2_list, run.axes),
         headers={"Content-Disposition":
                  _content_disposition(f"coverage_{run.capability_slug}.json")},
     )
+
+
+@app.get("/runs/{run_id}/download/coverage_8d.json")
+async def download_coverage_8d(run_id: str):
+    """8-dimension (D1-D8) coverage report — what the review page shows."""
+    from ..core.coverage import build_coverage_report
+    run = _get_run(run_id)
+    report = build_coverage_report(run)
+    payload = {
+        "total_prompts": report.total_prompts,
+        "gaps_count": report.gaps_count,
+        "dims": [
+            {
+                "code": d.code,
+                "name_zh": d.name_zh,
+                "countable": d.countable,
+                "planned_count": d.planned_count,
+                "hit_count": d.hit_count,
+                "total_prompts_hit": d.total_prompts_hit,
+                "values": [
+                    {"code": v.code, "name_zh": v.name_zh,
+                     "planned": v.planned, "hit_count": v.hit_count}
+                    for v in d.values
+                ],
+            }
+            for d in report.dims
+        ],
+    }
+    return JSONResponse(payload, headers={
+        "Content-Disposition": _content_disposition(
+            f"coverage_8d_{run.capability_slug}.json"
+        )
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -2069,18 +2158,34 @@ def compare_runs_page(request: Request, a: str = "", b: str = ""):
 
 @app.post("/runs/{run_id}/clone")
 def clone_run(run_id: str):
-    """Clone a run's design (SL2 + axes + tags + config) into a fresh run
-    sitting at P1_DIMENSIONS. User can review + tweak before generating.
+    """Clone a generate run's design (SL2 + axes + tags + config) into a
+    fresh run sitting at P1_DIMENSIONS. User can review + tweak before
+    generating.
 
-    For rewrite runs, the directive is copied too (but not source_prompts —
-    those are bound to a specific uploaded file).
+    Rewrite runs cannot be meaningfully cloned: source_prompts are bound
+    to a specific uploaded file, and creating a rewrite run with no
+    source data would leave an orphan in the DB + a useless directive
+    detached from any data. Block the path with a clear 400.
     """
     src = _get_run(run_id)
+
+    # P1-5: don't create orphans. Rewrite "clone" would only carry the
+    # directive — but the user has to re-upload anyway, and the
+    # /rewrite/upload form creates its own run, so the cloned one would
+    # be a permanent zombie. Block with a clean message instead.
+    if src.source == "rewrite":
+        raise HTTPException(
+            400,
+            "改写任务不支持「复制」(源文件无法跟随)。请直接走「改写已有 prompt」"
+            "重新上传同一份文件,改写指令可以在改写指令页手动重建。",
+        )
 
     new_id = str(uuid.uuid4())[:8]
     now = datetime.now()
 
-    # Clone everything design-relevant; reset everything output-related
+    # Generate-mode clone: copy design fields ONLY, never carry rewrite-mode
+    # fields (rewrite_directive / rewrite_seed) into a generate run — that
+    # would be a structural mismatch.
     new_run = Run(
         id=new_id,
         capability_slug=src.capability_slug,
@@ -2098,15 +2203,11 @@ def clone_run(run_id: str):
         target_set_size=src.target_set_size,
         provider=src.provider,
         model=src.model,
-        source=src.source,
-        # Budget: carry the cap setting (user's choice should persist across
-        # clones), but reset usage to 0 — the clone has spent nothing yet.
+        source="generate",       # always generate; rewrite path is blocked above
+        # Budget: carry cap, reset usage
         cost_usd_limit=src.cost_usd_limit,
         cost_usd_used=0.0,
-        # rewrite-source fields: directive carries but file/prompts don't
-        rewrite_directive=src.rewrite_directive.model_copy() if src.rewrite_directive else None,
-        # NOT copied: prompts, source_file, source_prompts, rewrite_round,
-        # p1_round, p4_round (start fresh)
+        # NOT copied: prompts, p1_round, p4_round, rewrite_* (start fresh)
     )
     RUNS[new_id] = new_run
 
@@ -2119,11 +2220,6 @@ def clone_run(run_id: str):
         RUN_INTAKE[new_id] = dict(RUN_INTAKE[run_id])
 
     _persist(new_id)
-    # Land user on the dimensions page (R1 for rewrite — but cloned rewrite has
-    # no source file, so steer to upload page instead in that case)
-    if new_run.source == "rewrite":
-        # Rewrite clone: directive carries but they need a fresh file
-        return RedirectResponse("/rewrite/upload", status_code=303)
     return RedirectResponse(f"/runs/{new_id}", status_code=303)
 
 

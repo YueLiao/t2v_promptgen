@@ -1,8 +1,9 @@
 """Mock data generators for the prototype web UI.
 
 These stand in for real LLM calls so the entire flow is clickable
-end-to-end without an API key. Replace with real phase implementations
-later by routing through `core.orchestrator`.
+end-to-end without an API key. Real LLM paths live in
+`web/llm_phases.py`; the routes in `web/app.py` decide which to call
+based on whether the run has credentials.
 """
 from __future__ import annotations
 

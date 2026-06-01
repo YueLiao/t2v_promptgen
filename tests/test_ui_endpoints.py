@@ -370,6 +370,118 @@ def test_seed_rejects_garbage(client):
     assert r.status_code == 400
 
 
+def test_goto_phase_rewrite_blocks_p1_jump(client):
+    """Audit P1-1: rewrite runs cannot rewind to P1/P0 (would orphan
+    source_prompts). Must return 400 with a clear message."""
+    run = _make_rewrite_run_with_sources("ui_goto1", n=2)
+    run.phase = Phase.P4_REVIEW
+    r = client.post(f"/runs/{run.id}/goto/P1_DIMENSIONS")
+    assert r.status_code == 400
+    assert "字段映射" in r.json().get("detail", "")
+    # Run state is intact — phase not changed, source_prompts not touched
+    assert run.phase == Phase.P4_REVIEW
+    assert len(run.source_prompts) == 2
+
+
+def test_goto_phase_rewrite_allows_p5_to_p4(client):
+    """Going back from export to review on a rewrite run is fine —
+    no destructive side-effects."""
+    run = _make_rewrite_run_with_sources("ui_goto2", n=2)
+    run.phase = Phase.P5_EXPORT
+    r = client.post(f"/runs/{run.id}/goto/P4_REVIEW")
+    assert r.status_code in (200, 303)
+    assert run.phase == Phase.P4_REVIEW
+
+
+def test_clone_rewrite_blocked(client):
+    """Audit P1-5: cloning a rewrite run would orphan a new Run with no
+    source_file. Must be blocked with 400, not silently create the orphan."""
+    run = _make_rewrite_run_with_sources("ui_clone1", n=2)
+    before = set(RUNS.keys())
+    r = client.post(f"/runs/{run.id}/clone")
+    assert r.status_code == 400
+    # No new run was created
+    assert set(RUNS.keys()) == before
+
+
+def test_clone_generate_skips_rewrite_fields(client):
+    """Audit P1-5 (other direction): a generate-mode clone must not
+    carry rewrite_directive / rewrite_seed (they'd be structural mismatch)."""
+    from datetime import datetime
+    src = Run(
+        id="ui_clone2", capability_slug="cap",
+        capability_display_name="cap",
+        created_at=datetime.now(), updated_at=datetime.now(),
+        phase=Phase.P4_REVIEW, source="generate",
+        cost_usd_limit=10.0, cost_usd_used=3.5,
+    )
+    RUNS["ui_clone2"] = src
+    r = client.post("/runs/ui_clone2/clone")
+    assert r.status_code in (200, 303)
+    # Find the new run id from the response
+    new_ids = [k for k in RUNS if k != "ui_clone2"]
+    new_id = next((k for k in new_ids if RUNS[k].user_description and
+                    "ui_clone2" in (RUNS[k].user_description or "")), None)
+    assert new_id is not None
+    clone = RUNS[new_id]
+    assert clone.source == "generate"
+    assert clone.rewrite_directive is None
+    assert clone.cost_usd_limit == 10.0
+    assert clone.cost_usd_used == 0.0     # reset
+    # Cleanup
+    RUNS.pop(new_id, None)
+
+
+def test_coverage_8d_download(client):
+    """Audit P1-14: dedicated download endpoint for the 8-dim coverage
+    report (was previously only viewable in the review page UI)."""
+    run = _make_run("ui_8d1", source="generate", n_prompts=3)
+    r = client.get(f"/runs/{run.id}/download/coverage_8d.json")
+    assert r.status_code == 200
+    d = r.json()
+    assert "dims" in d
+    assert len(d["dims"]) == 8
+    assert d["total_prompts"] == 3
+    cd = r.headers.get("content-disposition", "")
+    assert "coverage_8d" in cd
+
+
+def test_autopersist_clears_last_error_on_success(client):
+    """Audit S3: a successful 2xx mutation clears RUN_LAST_ERROR so
+    stale 'budget exceeded' banners don't haunt the UI forever.
+
+    Run id must be hex-only — the autopersist middleware regex extracts
+    `[a-f0-9]+` to identify the run on the URL path; non-hex ids would
+    silently skip persistence (matches real UUID-based ids).
+    """
+    from t2v_promptgen.web.app import RUN_LAST_ERROR
+    run = _make_run("abc12345", source="generate")
+    RUN_LAST_ERROR[run.id] = "[预算已用满] some old failure"
+    try:
+        # A 2xx mutation should clear it via the autopersist middleware
+        r = client.post(f"/runs/{run.id}/budget", json={"limit": 20.0})
+        assert r.status_code == 200
+        assert run.id not in RUN_LAST_ERROR
+    finally:
+        RUNS.pop("abc12345", None)
+        RUN_LAST_ERROR.pop("abc12345", None)
+
+
+def test_autopersist_keeps_last_error_on_4xx(client):
+    """4xx leaves the error in place so the user sees what just failed."""
+    from t2v_promptgen.web.app import RUN_LAST_ERROR
+    run = _make_run("abcdef12", source="generate")
+    RUN_LAST_ERROR[run.id] = "[预算已用满] stale"
+    try:
+        # 4xx: negative limit
+        r = client.post(f"/runs/{run.id}/budget", json={"limit": -5})
+        assert r.status_code == 400
+        assert RUN_LAST_ERROR.get(run.id) == "[预算已用满] stale"
+    finally:
+        RUNS.pop("abcdef12", None)
+        RUN_LAST_ERROR.pop("abcdef12", None)
+
+
 def test_preview_changes_with_different_seed(client):
     """Same directive, different seed → same totals but different per-prompt
     distribution (verified by checking seed echoes back)."""

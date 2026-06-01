@@ -104,8 +104,15 @@
       </a>
       <a href="/runs/{{ run.id }}/download/coverage.json" class="flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition">
         <div>
-          <div class="font-medium text-slate-900">覆盖度报告</div>
+          <div class="font-medium text-slate-900">覆盖度报告(检查项 × 变量)</div>
           <div class="text-xs text-slate-500">每个检查项 × 每种条件实际被多少条用例覆盖</div>
+        </div>
+        <span class="text-orange-600 text-sm">下载 ↓</span>
+      </a>
+      <a href="/runs/{{ run.id }}/download/coverage_8d.json" class="flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition">
+        <div>
+          <div class="font-medium text-slate-900">8 维标签覆盖(D1-D8)</div>
+          <div class="text-xs text-slate-500">主体/动作/速度/镜头/景别/场景/风格/功能 八个维度的命中分布 + 空缺</div>
         </div>
         <span class="text-orange-600 text-sm">下载 ↓</span>
       </a>
