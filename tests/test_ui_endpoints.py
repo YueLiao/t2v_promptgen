@@ -467,6 +467,93 @@ def test_autopersist_clears_last_error_on_success(client):
         RUN_LAST_ERROR.pop("abc12345", None)
 
 
+def test_resume_rejects_running_state(client):
+    """If a rewrite is currently running, resume must 409 not double-spawn."""
+    from t2v_promptgen.web.app import RUN_REWRITE_STATE
+    run = _make_rewrite_run_with_sources("ui_res1", n=3)
+    RUN_REWRITE_STATE[run.id] = {"status": "running", "done": 1, "total": 3, "result": None}
+    try:
+        r = client.post(f"/rewrite/{run.id}/resume")
+        assert r.status_code == 409
+        assert r.json()["code"] == "ALREADY_RUNNING"
+    finally:
+        RUN_REWRITE_STATE.pop(run.id, None)
+
+
+def test_resume_rejects_completed_state(client):
+    """Resume only valid in 'interrupted' state, not 'completed'."""
+    from t2v_promptgen.web.app import RUN_REWRITE_STATE
+    run = _make_rewrite_run_with_sources("ui_res2", n=3)
+    RUN_REWRITE_STATE[run.id] = {"status": "completed", "done": 3, "total": 3, "result": None}
+    try:
+        r = client.post(f"/rewrite/{run.id}/resume")
+        assert r.status_code == 400
+        assert r.json()["code"] == "NOT_INTERRUPTED"
+    finally:
+        RUN_REWRITE_STATE.pop(run.id, None)
+
+
+def test_resume_rejects_non_rewrite_run(client):
+    run = _make_run("ui_res3", source="generate")
+    r = client.post(f"/rewrite/{run.id}/resume")
+    assert r.status_code == 400
+
+
+def test_resume_with_no_creds_400(client):
+    """Even resume needs an API key — the LLM batches need credentials."""
+    from t2v_promptgen.web.app import RUN_REWRITE_STATE, RUN_CREDS
+    run = _make_rewrite_run_with_sources("ui_res4", n=3)
+    RUN_REWRITE_STATE[run.id] = {"status": "interrupted", "done": 0, "total": 3, "result": None}
+    RUN_CREDS.pop(run.id, None)
+    try:
+        r = client.post(f"/rewrite/{run.id}/resume")
+        assert r.status_code == 400
+        assert r.json()["code"] == "NO_API_KEY"
+    finally:
+        RUN_REWRITE_STATE.pop(run.id, None)
+
+
+def test_resume_with_nothing_pending_advances_to_p4(client):
+    """If every source_prompt either has an entry or is marked failed,
+    resume short-circuits: advance phase to P4 cleanly."""
+    from t2v_promptgen.web.app import RUN_REWRITE_STATE, RUN_CREDS
+    run = _make_rewrite_run_with_sources("ui_res5", n=2)
+    # Mark both as already-done (entries exist for them)
+    for sp in run.source_prompts:
+        sp.failed_to_rewrite = False
+    # Add corresponding PromptEntry rows so done_sids covers them
+    from datetime import datetime
+    for sp in run.source_prompts:
+        run.prompts.append(PromptEntry(
+            id=f"rw_{sp.source_id}",
+            source_id=sp.source_id,
+            capability="cap", capability_version=1,
+            difficulty="medium", difficulty_score=5.0,
+            sl2_covered=[], axes_values={},
+            subject_count=1, action_count=1,
+            camera_zh=None, camera_en=None,
+            prompt_zh="x", prompt_en="x",
+            generated_at=datetime.now(),
+        ))
+    run.phase = Phase.P3_QA
+    RUN_REWRITE_STATE[run.id] = {"status": "interrupted", "done": 2, "total": 2, "result": None}
+    RUN_CREDS[run.id] = {"provider": "deepseek", "model": "x",
+                          "model_p1": "x", "model_p2": "x",
+                          "api_key": "sk-fake", "base_url": None}
+    try:
+        r = client.post(f"/rewrite/{run.id}/resume")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["ok"] is True
+        assert d["completed"] is True
+        assert d["remaining"] == 0
+        assert run.phase == Phase.P4_REVIEW
+        assert run.id not in RUN_REWRITE_STATE
+    finally:
+        RUN_REWRITE_STATE.pop(run.id, None)
+        RUN_CREDS.pop(run.id, None)
+
+
 def test_autopersist_keeps_last_error_on_4xx(client):
     """4xx leaves the error in place so the user sees what just failed."""
     from t2v_promptgen.web.app import RUN_LAST_ERROR

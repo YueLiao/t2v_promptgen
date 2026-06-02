@@ -124,13 +124,16 @@ async def _autopersist_middleware(request: Request, call_next):
 def _load_persisted_runs():
     """Rehydrate RUNS + side dicts from SQLite.
 
-    P1-12: also audit for runs stuck in transient phases (P3_QA with no
-    background task to resume them — only possible after a server restart
-    mid-rewrite). Flip those to P4_REVIEW with a clear error message so
-    the UI doesn't trap the user on generating.html forever.
+    手术 3 (resumable rewrite): when a P3_QA rewrite run loads with no live
+    RUN_REWRITE_STATE (which is always the case post-restart since that
+    dict is in-memory), we DON'T flip the phase. We mark the rewrite state
+    as "interrupted" so the generating page shows a "▶ 继续改写" button
+    that POSTs to /rewrite/{id}/resume. The user explicitly resumes; if
+    they instead jump to P4 themselves, they keep whatever partial output
+    is on disk.
     """
-    from ..core.persistence import list_runs, save_run
-    stuck = 0
+    from ..core.persistence import list_runs
+    resumable = 0
     for run, extras in list_runs():
         RUNS[run.id] = run
         if "creds" in extras:
@@ -143,23 +146,21 @@ def _load_persisted_runs():
             RUN_INTAKE[run.id] = extras["intake"]
         if "last_error" in extras:
             RUN_LAST_ERROR[run.id] = extras["last_error"]
-        # Rescue transient-phase runs: P3_QA implies an active LLM batch
-        # that we just lost. RUN_REWRITE_STATE is in-memory only, so on
-        # restart any P3 run is by definition orphaned.
-        if run.phase == Phase.P3_QA:
-            run.phase = Phase.P4_REVIEW
-            run.updated_at = datetime.now()
-            RUN_LAST_ERROR[run.id] = (
-                "[改写中断] 服务在改写过程中重启,本批未完成的产物已丢弃。"
-                "请到审核页确认现有结果,或回 R2 重新发起。"
-            )
-            try:
-                save_run(run, last_error=RUN_LAST_ERROR[run.id])
-            except Exception:
-                pass
-            stuck += 1
+        # Rewrite runs that died mid-batch land here. Source prompts
+        # already mark succeeded ones (via run.prompts having that
+        # source_id) and failed ones (failed_to_rewrite=True). Resume
+        # = re-run rewrite_run() against the remaining eligible pool.
+        if run.phase == Phase.P3_QA and run.source == "rewrite":
+            RUN_REWRITE_STATE[run.id] = {
+                "status": "interrupted",
+                "done": len(run.prompts),
+                "total": len([sp for sp in run.source_prompts
+                                if sp.selected and not sp.failed_to_rewrite]) + len(run.prompts),
+                "result": None,
+            }
+            resumable += 1
     print(f"[persistence] loaded {len(RUNS)} runs from SQLite "
-          f"({stuck} rescued from stuck P3_QA)", flush=True)
+          f"({resumable} rewrite runs resumable from P3_QA)", flush=True)
 
 
 def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
@@ -1199,6 +1200,78 @@ def rewrite_start(run_id: str, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_run_rewrite_background, run_id, client)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+@app.post("/rewrite/{run_id}/resume")
+def rewrite_resume(run_id: str, background_tasks: BackgroundTasks):
+    """手术 3: resume a rewrite that was interrupted by a server restart.
+
+    On startup, P3_QA rewrite runs get RUN_REWRITE_STATE['status']
+    = 'interrupted' instead of being force-advanced to P4. This endpoint
+    re-spawns the background task; rewrite_run's `_eligible_prompts`
+    already filters out source_prompts whose entry is in run.prompts, so
+    we pick up exactly where we left off.
+    """
+    run = _get_run(run_id)
+    if run.source != "rewrite":
+        raise HTTPException(400, "Not a rewrite run")
+    cur = RUN_REWRITE_STATE.get(run_id, {})
+    if cur.get("status") in ("running", "qa_running"):
+        return JSONResponse(
+            {"ok": False, "code": "ALREADY_RUNNING", "message": "改写已在进行"},
+            status_code=409,
+        )
+    if cur.get("status") != "interrupted":
+        return JSONResponse(
+            {"ok": False, "code": "NOT_INTERRUPTED",
+             "message": "当前任务并非中断状态,无法 resume"},
+            status_code=400,
+        )
+    creds = RUN_CREDS.get(run_id)
+    if not creds or not creds.get("api_key"):
+        return JSONResponse(
+            {"ok": False, "code": "NO_API_KEY",
+             "message": "继续改写也需要 API key (可去设置页临时填一个)"},
+            status_code=400,
+        )
+
+    # Filter to whatever's still pending (selected, not failed, no entry yet)
+    done_sids = {p.source_id for p in run.prompts if p.source_id}
+    pending = [sp for sp in run.source_prompts
+                 if sp.selected and not sp.failed_to_rewrite
+                 and sp.source_id not in done_sids]
+    if run.rewrite_directive and run.rewrite_directive.selected_source_ids:
+        idset = set(run.rewrite_directive.selected_source_ids)
+        pending = [sp for sp in pending if sp.source_id in idset]
+
+    if not pending:
+        # Nothing left to do — just advance to P4 cleanly
+        run.phase = Phase.P4_REVIEW
+        run.updated_at = datetime.now()
+        RUN_REWRITE_STATE.pop(run_id, None)
+        return JSONResponse({"ok": True, "completed": True, "remaining": 0})
+
+    client = llm_phases.build_client(
+        provider=creds["provider"],
+        model=creds.get("model_p2") or creds["model"],
+        api_key=creds["api_key"],
+        base_url=creds.get("base_url") or None,
+    )
+    client = _wrap_budget(client, run_id)
+
+    with _REWRITE_STATE_LOCK:
+        RUN_REWRITE_STATE[run_id] = {
+            "status": "running",
+            "done": len(done_sids),
+            "total": len(pending) + len(done_sids),
+            "started_at": datetime.now().isoformat(),
+            "result": None,
+            "resumed": True,
+        }
+        RUN_REWRITE_CANCEL[run_id] = False
+
+    background_tasks.add_task(_run_rewrite_background, run_id, client)
+    return JSONResponse({"ok": True, "remaining": len(pending)})
 
 
 def _run_rewrite_background(run_id: str, client):

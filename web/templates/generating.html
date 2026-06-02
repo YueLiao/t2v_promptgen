@@ -15,7 +15,28 @@
     <span x-show="status === 'completed'" x-cloak>全部完成 ✓</span>
     <span x-show="status === 'cancelled'" x-cloak>已取消</span>
     <span x-show="status === 'failed'" x-cloak>改写失败</span>
+    <span x-show="status === 'interrupted'" x-cloak>改写被中断</span>
   </h2>
+
+  <!-- Interrupted state: show resume button -->
+  <div x-show="status === 'interrupted'" x-cloak class="my-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm">
+    <p class="text-amber-900 mb-2">
+      服务在改写过程中重启了,本批未完成的产物已保存,可以从中断点继续。
+    </p>
+    <p class="text-xs text-slate-600 mb-3">
+      已完成 <span class="font-medium" x-text="done"></span> 条 ·
+      剩余 <span class="font-medium" x-text="total - done"></span> 条待改写
+    </p>
+    <div class="flex items-center justify-center gap-2">
+      <button type="button" @click="resume()" :disabled="resuming"
+              class="bg-orange-500 hover:bg-orange-600 disabled:bg-slate-300 text-white text-sm px-4 py-1.5 rounded">
+        <span x-show="!resuming">▶ 继续改写</span>
+        <span x-show="resuming">启动中...</span>
+      </button>
+      <a href="/runs/{{ run.id }}" class="text-xs text-slate-500 hover:text-slate-900 px-3">放弃继续 → 直接审核</a>
+    </div>
+    <p x-show="resumeError" x-cloak class="text-xs text-red-700 mt-2" x-text="resumeError"></p>
+  </div>
 
   <!-- Progress bar -->
   <div class="my-4">
@@ -84,6 +105,8 @@ function rewriteProgress() {
     costPct: 0,
     budgetExceeded: false,
     startedAt: Date.now(),
+    resuming: false,
+    resumeError: '',
     percent() { return this.total ? Math.round(100 * this.done / this.total) : 0; },
     eta() {
       if (this.done === 0 || this.status !== 'running') return '';
@@ -103,6 +126,11 @@ function rewriteProgress() {
           this.total = data.total || this.total;
           this.result = data.result || null;
           this.budgetExceeded = (data.result && data.result.budget_exceeded) || false;
+          // Terminal / waiting states stop the poll loop
+          if (this.status === 'interrupted') {
+            // Wait for user to click resume; don't auto-advance
+            break;
+          }
           if (this.status !== 'running' && this.status !== 'qa_running') {
             if (this.status === 'completed') {
               setTimeout(() => window.location.href = '/runs/{{ run.id }}', 1200);
@@ -112,6 +140,28 @@ function rewriteProgress() {
         } catch (e) { /* keep polling */ }
         await new Promise(r => setTimeout(r, 2000));
       }
+    },
+    async resume() {
+      this.resuming = true;
+      this.resumeError = '';
+      try {
+        const r = await fetch('/rewrite/{{ run.id }}/resume', {method: 'POST'});
+        const d = await r.json();
+        if (!r.ok || !d.ok) {
+          this.resumeError = d.message || ('HTTP ' + r.status);
+          return;
+        }
+        if (d.completed) {
+          // Nothing was pending — just go to review
+          window.location.href = '/runs/{{ run.id }}';
+          return;
+        }
+        // Resumed: switch back to running and resume polling
+        this.status = 'running';
+        this.startedAt = Date.now();
+        this.poll();
+      } catch (e) { this.resumeError = String(e); }
+      finally { this.resuming = false; }
     },
     async pollBudget() {
       while (this.status === 'running' || this.status === 'qa_running') {
