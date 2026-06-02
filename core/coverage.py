@@ -214,19 +214,59 @@ def _count_d6(prompts: list[PromptEntry]) -> dict[str, int]:
 # Top-level
 # ---------------------------------------------------------------------------
 
-_COUNTABLE_DIMS = {"D1", "D4", "D6"}
+# A dim is "countable" if we have any way to count hits from a prompt:
+#   - D1/D4/D6 always (heuristics OR d_tags)
+#   - D2/D3/D5/D7/D8 only if at least one prompt populated d_tags for them
+# Resolved per-run inside build_coverage_report below.
+_ALWAYS_COUNTABLE = {"D1", "D4", "D6"}
+
+
+def _count_from_d_tags(prompts: list[PromptEntry], dim_code: str) -> dict[str, int]:
+    """Count per-value hits using PromptEntry.d_tags (LLM-emitted truth).
+
+    When the LLM emits d_tags directly (PR series ≥ 手术 2), this is the
+    authoritative path — no scene_l1 heuristics, no camera-zh denylist
+    fragility. Returns {value_code: count} aggregated over all prompts that
+    declared a tag for `dim_code`. Prompts with no d_tags entry are skipped.
+    """
+    counts: dict[str, int] = {}
+    for p in prompts:
+        tags = (p.d_tags or {}).get(dim_code) or []
+        for v in tags:
+            counts[v] = counts.get(v, 0) + 1
+    return counts
 
 
 def build_coverage_report(run: Run) -> CoverageReport8D:
-    """Compute per-dim coverage for a Run."""
+    """Compute per-dim coverage for a Run.
+
+    Per-dim hit counts come from `PromptEntry.d_tags` (LLM-emitted)
+    when ≥1 prompt populates that dim. Falls back to the legacy
+    heuristics (subject_type → D1, camera_zh substring → D4, scene_l1
+    → D6) when d_tags is missing so older runs still produce a report.
+    """
     rec = run.recommended_tags or {}
     prompts = run.prompts or []
 
-    # Count hits per countable dim
-    hits_d1 = _count_d1(prompts)
-    hits_d4 = _count_d4(prompts)
-    hits_d6 = _count_d6(prompts)
-    hits_by_dim = {"D1": hits_d1, "D4": hits_d4, "D6": hits_d6}
+    # Prefer LLM-emitted d_tags per dim when any prompt populated that dim.
+    # Otherwise fall back to the older heuristic counter (so prompts
+    # generated before d_tags shipped still get a sensible report).
+    def _hits(dim: str, heuristic):
+        d_hits = _count_from_d_tags(prompts, dim)
+        return d_hits if d_hits else heuristic(prompts)
+
+    hits_d1 = _hits("D1", _count_d1)
+    hits_d4 = _hits("D4", _count_d4)
+    hits_d6 = _hits("D6", _count_d6)
+    # D2/D3/D5/D7/D8 had NO heuristic — purely planned before. Now if d_tags
+    # is populated for those, surface the counts; otherwise leave empty.
+    hits_by_dim = {
+        "D1": hits_d1, "D2": _count_from_d_tags(prompts, "D2"),
+        "D3": _count_from_d_tags(prompts, "D3"), "D4": hits_d4,
+        "D5": _count_from_d_tags(prompts, "D5"), "D6": hits_d6,
+        "D7": _count_from_d_tags(prompts, "D7"),
+        "D8": _count_from_d_tags(prompts, "D8"),
+    }
 
     out_dims: list[DimCoverage] = []
     for d in ALL_DIMENSIONS:
@@ -241,11 +281,13 @@ def build_coverage_report(run: Run) -> CoverageReport8D:
             )
             for v in d.values
         ]
+        # Countable if always-countable OR any prompt populated d_tags for this dim
+        countable = d.code in _ALWAYS_COUNTABLE or bool(hits)
         out_dims.append(DimCoverage(
             code=d.code,
             name_zh=d.name_zh,
             values=values,
-            countable=d.code in _COUNTABLE_DIMS,
+            countable=countable,
         ))
 
     return CoverageReport8D(total_prompts=len(prompts), dims=out_dims)

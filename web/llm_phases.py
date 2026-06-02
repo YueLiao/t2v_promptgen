@@ -15,6 +15,33 @@ from ..llm.providers import openai_compat, anthropic_client  # register
 from ..phases.qa import run as run_qa_phase, QAReport
 
 
+def _validate_d_tags(raw) -> dict[str, list[str]]:
+    """Coerce LLM-emitted d_tags into the {Dn: [code, ...]} schema.
+
+    Drops:
+      - non-dict at the top level
+      - keys not matching D1..D8
+      - codes not in the annotation_schema vocabulary
+      - empty / null values
+
+    Returns an empty dict on any structural failure; caller is fine with
+    that (coverage.py falls back to its heuristics when d_tags is empty).
+    """
+    if not isinstance(raw, dict):
+        return {}
+    from ..core.annotation_schema import CODE_INDEX
+    out: dict[str, list[str]] = {}
+    for k, vs in raw.items():
+        if not isinstance(k, str) or not (k.startswith("D") and k[1:].isdigit()):
+            continue
+        if not isinstance(vs, list):
+            continue
+        valid = [str(v) for v in vs if isinstance(v, str) and v in CODE_INDEX]
+        if valid:
+            out[k] = valid
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Client builder (per-run credentials, not persisted)
 # ---------------------------------------------------------------------------
@@ -275,10 +302,35 @@ stress 不只是"难",而是**故意挑战模型的薄弱环节**。一条 stres
       "camera_zh": "镜头慢慢推近",
       "camera_en": "Slow push-in",
       "prompt_zh": "...",
-      "prompt_en": "..."
+      "prompt_en": "...",
+      "d_tags": {
+        "D1": ["S1"],  "D2": ["A30"], "D3": ["V3"],
+        "D4": ["C2"],  "D5": ["P3"],  "D6": ["E5"],
+        "D7": ["Y20"], "D8": ["F1"]
+      }
     }
   ]
-}"""
+}
+
+# d_tags 必填字段说明(8 维标签自报)
+对每条 prompt 你必须显式标注它在以下 8 个维度各落在哪个值。每个维度选
+1 个值(用代码,不要中文名),让覆盖度报告精准。代码表见下:
+- D1 主体: S1=单人 S2=多人 S3=无角色 S4=单动物 S5=多主体混合
+- D2 动作: A1-A40(常见动词;若无完全匹配,选最近的)
+- D3 速度: V1=静态 V2=慢 V3=正常 V4=快 V5=极快 V6=变速
+- D4 镜头: C1=固定 C2=推 C3=拉 C4=跟随 C5=摇 C6=环绕
+            C7=POV C8=FPV 无人机 C9=手持晃动 C10=复合
+            C11=航拍/鸟瞰 C12=微距/极近 C13=未指定
+- D5 景别: P1=大远景 P2=远景 P3=全景 P4=中景 P5=近景 P6=特写
+- D6 场景: E1=室外自然 E2=室外城市 E3=赛道 E4=室内古建
+            E5=室内现代 E6=舞台会场 E7=室外历史 E8=奇幻虚拟
+            E9=车内 E10=空中 E11=水下 E12=太空/外星
+            E13=实验室/医疗 E14=教育/办公 E15=商业/餐饮
+            E16=运动场/游乐场 E17=微观/集体 E18=抽象/纯色背景
+- D7 风格: Y1-Y20(写实电影/卡通/3D/科幻/水彩 等)
+- D8 功能: F1=主体生成 F2=动作执行 F3=时序展开
+            F4=场景构建 F5=风格控制 F6=综合
+不确定就给最接近的一个值,空数组 `[]` 表示放弃这维(会被记为未覆盖)。"""
 
 
 def generate_prompts_real(
@@ -527,6 +579,7 @@ Axes 列表(每条 prompt 必须设置所有轴的具体值):
                         subject_type=subject_type,
                         motion_verbs=item.get("motion_verbs", []) or [],
                         temporal_markers=item.get("temporal_markers", []) or [],
+                        d_tags=_validate_d_tags(item.get("d_tags")),
                         generated_at=datetime.now(),
                     )
                     all_prompts.append(entry)

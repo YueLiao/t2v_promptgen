@@ -143,6 +143,16 @@ class PromptEntry(BaseModel):
     motion_verbs: list[str] = Field(default_factory=list)
     temporal_markers: list[str] = Field(default_factory=list)
 
+    # 8-dimension tag self-declaration (D1 主体 / D2 动作 / D3 速度 / D4 镜头 /
+    # D5 景别 / D6 场景 / D7 风格 / D8 功能). LLM-emitted, validated against
+    # the annotation_schema vocabulary at parse time. Empty for prompts that
+    # predate this field — coverage.py falls back to its old heuristics in
+    # that case (substring D4 detection + scene_l1 → D6 mapping).
+    d_tags: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Map dim_code (D1..D8) → list of value codes (S1, A30, ...)."
+    )
+
     generated_at: datetime
     generation_round: int = 1                # incremented on regen
 

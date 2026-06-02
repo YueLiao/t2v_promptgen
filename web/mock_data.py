@@ -338,6 +338,15 @@ def generate_mock_prompts(sl2_list: list[SL2], axes: list[Axis],
 
         is_stress = random.random() < 0.32  # ≈30%
 
+        # Fake but plausible d_tags so coverage report demos work without API key
+        cam_codes = ["C1", "C2", "C3", "C4"]   # 固定/推/拉/跟随
+        mock_d_tags = {
+            "D1": ["S1" if subj_count == 1 else "S2"],
+            "D3": [random.choice(["V2", "V3", "V4"])],
+            "D4": [cam_codes[cam_idx] if cam_idx < len(cam_codes) else "C1"],
+            "D5": [random.choice(["P4", "P5", "P6"])],
+            "D6": [random.choice(["E1", "E5", "E14"])],
+        }
         prompts.append(PromptEntry(
             id=f"spec_hand_{i+1:03d}",
             capability="human_hand",
@@ -353,6 +362,7 @@ def generate_mock_prompts(sl2_list: list[SL2], axes: list[Axis],
             camera_en=_CAMERAS_EN[cam_idx].rstrip(". ").strip() if cam_idx < 3 else None,
             prompt_zh=zh,
             prompt_en=en,
+            d_tags=mock_d_tags,
             generated_at=datetime.now(),
         ))
 
