@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .rewrite_schema import SourceFile, SourcePrompt, RewriteDirective  # noqa: F401
 
@@ -283,6 +283,53 @@ class Run(BaseModel):
     rewrite_directive: RewriteDirective | None = None
     rewrite_round: int = Field(default=0, ge=0)
     rewrite_max_rounds: int = Field(default=3, ge=1, le=10)
+
+    # ---- Source-field exclusivity (P1-2 from audit) -------------------------
+    # The two flow types (generate / rewrite) share a Run model but use
+    # disjoint subsets of fields. A model_validator enforces that a generate
+    # run never carries rewrite-only state (and vice versa) — catches the
+    # structural bugs that clone_run / goto_phase used to trigger silently.
+
+    @model_validator(mode="after")
+    def _enforce_source_exclusivity(self):
+        if self.source == "generate":
+            # Generate runs MUST NOT carry rewrite-only state.
+            bad = []
+            if self.source_file is not None:
+                bad.append("source_file")
+            if self.source_prompts:
+                bad.append("source_prompts")
+            if self.field_mapping:
+                bad.append("field_mapping")
+            if self.rewrite_directive is not None:
+                bad.append("rewrite_directive")
+            if self.rewrite_seed is not None:
+                bad.append("rewrite_seed")
+            if bad:
+                raise ValueError(
+                    f"generate-mode Run cannot carry rewrite-only fields: {bad}"
+                )
+        elif self.source == "rewrite":
+            # Rewrite runs are looser — they can legitimately have sl2_list /
+            # axes empty AND they often share the prompts list (the rewrite
+            # outputs go there). We only enforce that recommended_tags +
+            # original_ai_tags + custom_tags stay empty (these are P1 design
+            # state that has no meaning in rewrite mode).
+            if self.recommended_tags or self.original_ai_tags or self.custom_tags:
+                raise ValueError(
+                    "rewrite-mode Run cannot carry P1 tag-recommendation state"
+                )
+        return self
+
+    @property
+    def is_generate(self) -> bool:
+        """True for from-scratch capability generation runs."""
+        return self.source == "generate"
+
+    @property
+    def is_rewrite(self) -> bool:
+        """True for "rewrite uploaded prompt list" runs."""
+        return self.source == "rewrite"
 
 
 # ---------------------------------------------------------------------------

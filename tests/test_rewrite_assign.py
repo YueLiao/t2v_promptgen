@@ -393,6 +393,7 @@ def test_run_rewrite_seed_persists_through_jsondump():
         id="seedtest1", capability_slug="x",
         created_at=datetime.now(), updated_at=datetime.now(),
         phase=Phase.P1_DIMENSIONS,
+        source="rewrite",        # rewrite_seed only valid on rewrite runs
         rewrite_seed=12345,
     )
     j = r1.model_dump_json()
