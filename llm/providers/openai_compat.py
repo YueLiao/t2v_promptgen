@@ -39,6 +39,10 @@ PROFILES = {
     "moonshot":   "https://api.moonshot.cn/v1",
     "zhipu":      "https://open.bigmodel.cn/api/paas/v4",
     "siliconflow": "https://api.siliconflow.cn/v1",
+    # Anthropic exposes an OpenAI-compatible endpoint (beta) at this path.
+    # A1 fix: route "anthropic" requests through here instead of the legacy
+    # stub that raised NotImplementedError on every call.
+    "anthropic":  "https://api.anthropic.com/v1",
 }
 
 # Pricing fallback (USD per 1M tokens) — proxy endpoints often don't expose pricing,

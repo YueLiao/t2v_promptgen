@@ -151,11 +151,18 @@ def _load_persisted_runs():
         # source_id) and failed ones (failed_to_rewrite=True). Resume
         # = re-run rewrite_run() against the remaining eligible pool.
         if run.phase == Phase.P3_QA and run.source == "rewrite":
+            # R1 fix: count only rewrite-originated prompts (source_id set)
+            # to avoid >100% progress display if the prompts list somehow
+            # carries entries without source_id.
+            done_count = sum(1 for p in run.prompts if p.source_id)
+            pending_count = sum(
+                1 for sp in run.source_prompts
+                if sp.selected and not sp.failed_to_rewrite
+            )
             RUN_REWRITE_STATE[run.id] = {
                 "status": "interrupted",
-                "done": len(run.prompts),
-                "total": len([sp for sp in run.source_prompts
-                                if sp.selected and not sp.failed_to_rewrite]) + len(run.prompts),
+                "done": done_count,
+                "total": pending_count + done_count,
                 "result": None,
             }
             resumable += 1
@@ -163,8 +170,74 @@ def _load_persisted_runs():
           f"({resumable} rewrite runs resumable from P3_QA)", flush=True)
 
 
+class APIAccessError(RuntimeError):
+    """The LLM endpoint rejected us (auth / quota / endpoint config).
+
+    Distinct from generic Exception so the upper layers can surface
+    "API doesn't work" clearly instead of silently falling back to mock.
+    Wraps the original exception via `__cause__`.
+    """
+    def __init__(self, message: str, kind: str = "unknown"):
+        super().__init__(message)
+        self.kind = kind        # "auth" | "rate_limit" | "endpoint" | "network" | "unknown"
+
+
+# Substrings that identify error categories in arbitrary exception strings.
+# Provider SDK exception types vary (openai.AuthenticationError,
+# httpx.HTTPStatusError 401, custom proxy 403, etc.) — string-match is the
+# most portable hook.
+_API_AUTH_MARKERS = (
+    "authenticationerror", "401", "403", "invalid api key", "invalid_api_key",
+    "unauthorized", "auth failed", "incorrect api key", "permissiondenied",
+)
+_API_RATE_MARKERS = (
+    "ratelimiterror", "429", "rate limit", "too many requests", "quotaerror",
+)
+_API_ENDPOINT_MARKERS = (
+    "404 not found", "no such model", "model_not_found", "notfounderror",
+    "could not resolve host", "name or service not known", "connection refused",
+)
+_API_NETWORK_MARKERS = (
+    "timeout", "timed out", "connectionerror", "connection reset",
+    "ssl", "remote disconnected",
+)
+
+
+def _classify_api_error(exc: BaseException) -> APIAccessError | None:
+    """Inspect an exception (and chain) for known API-access failure modes.
+
+    Returns an APIAccessError wrapping the original when it matches a
+    well-known auth/rate-limit/endpoint/network pattern. Returns None for
+    "ordinary" exceptions (caller's free to mock-fallback then).
+    """
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        text = f"{type(cur).__name__}: {cur}".lower()
+        if any(m in text for m in _API_AUTH_MARKERS):
+            return APIAccessError(f"API key 验证失败: {exc}", kind="auth")
+        if any(m in text for m in _API_RATE_MARKERS):
+            return APIAccessError(f"被限流(rate limit): {exc}", kind="rate_limit")
+        if any(m in text for m in _API_ENDPOINT_MARKERS):
+            return APIAccessError(f"endpoint / model 配置错: {exc}", kind="endpoint")
+        if any(m in text for m in _API_NETWORK_MARKERS):
+            return APIAccessError(f"网络/超时: {exc}", kind="network")
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
 def _try_real_dimensions(run_id: str, run: Run, feedback: str = ""):
-    """Try LLM-backed dimension generation. Returns (sl2, axes) or raises."""
+    """Try LLM-backed dimension generation. Returns (sl2, axes) or raises.
+
+    Raises:
+      RuntimeError("no credentials") — caller treats as legitimate
+        mock-mode (no API key set).
+      APIAccessError — endpoint rejected the call (401 / 429 / bad model
+        / timeout). Caller surfaces it as a user-visible error rather
+        than silently mocking.
+      Other Exception — treat as transient; mock fallback OK.
+    """
     creds = RUN_CREDS.get(run_id)
     if not creds or not creds.get("api_key"):
         raise RuntimeError("no credentials")
@@ -472,6 +545,18 @@ def create_run(
         raise HTTPException(status_code=402, detail=msg)
     except Exception as exc:
         import traceback
+        # A3 fix: distinguish API-access errors (401/429/timeout/etc.) from
+        # legit "no credentials" mock-mode. For API errors, surface a clear
+        # error instead of silently producing mock data that looks real.
+        api_err = _classify_api_error(exc)
+        if api_err is not None and "no credentials" not in str(exc):
+            # Hard fail — don't mock-cover an authentication failure
+            msg = f"[API 调用失败 · {api_err.kind}] {api_err}"
+            print(msg, flush=True)
+            traceback.print_exc()
+            RUN_LAST_ERROR[run_id] = msg
+            _cleanup_run_state(run_id)
+            raise HTTPException(status_code=502, detail=msg)
         err = f"[P1 LLM 调用失败 → 走 mock] slug={slug}  {type(exc).__name__}: {exc}"
         print(err, flush=True)
         traceback.print_exc()
@@ -1326,24 +1411,44 @@ def _run_rewrite_background(run_id: str, client):
             },
         }
         run.updated_at = datetime.now()
-        _persist(run_id)    # bg-task path bypasses middleware, so persist explicitly
+        try:
+            _persist(run_id)    # bg-task path bypasses middleware, so persist explicitly
+        except Exception as pexc:
+            # H4 fix: isolate persist failure — terminal in-memory state
+            # is already set; if disk write fails the user can still see
+            # the result, restart will re-flag interrupted (harmless).
+            print(f"[rewrite-bg persist fail] run={run_id}: {pexc}", flush=True)
     except Exception as exc:
-        # Detect budget exceedance for clearer messaging
+        # Detect budget exceedance + API-access errors for clearer messaging
         from ..llm.budget import BudgetExceededError
         is_budget = isinstance(exc, BudgetExceededError)
+        api_err = None if is_budget else _classify_api_error(exc)
+        if api_err is not None:
+            err_str = f"[API 调用失败 · {api_err.kind}] {api_err}"
+            extra_kind = {"api_error_kind": api_err.kind}
+        elif is_budget:
+            err_str = str(exc)
+            extra_kind = {"budget_exceeded": True}
+        else:
+            err_str = f"{type(exc).__name__}: {exc}"
+            extra_kind = {}
         RUN_REWRITE_STATE[run_id] = {
             "status": "failed",
             "done": _progress_done(run_id),
             "total": RUN_REWRITE_STATE.get(run_id, {}).get("total", 0),
-            "result": {
-                "error": str(exc) if is_budget else f"{type(exc).__name__}: {exc}",
-                "budget_exceeded": is_budget,
-            },
+            "result": {"error": err_str, **extra_kind},
         }
         # P0-1 fix: advance phase even on background failure
         run.phase = Phase.P4_REVIEW
         run.updated_at = datetime.now()
-        _persist(run_id)
+        RUN_LAST_ERROR[run_id] = err_str
+        try:
+            _persist(run_id)
+        except Exception as pexc:
+            # H4 fix: second-level exception isolation — never leave the
+            # status dict half-written. Print only; in-memory terminal
+            # state is sound.
+            print(f"[rewrite-bg fail-persist fail] run={run_id}: {pexc}", flush=True)
         print(f"[rewrite-failed] run={run_id}: {exc}", flush=True)
 
 
@@ -1753,37 +1858,115 @@ def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_text: str
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
-@app.post("/runs/{run_id}/p1/confirm")
-def p1_confirm(run_id: str):
-    run = _get_run(run_id)
+# Generate-flow background state, mirrors RUN_REWRITE_STATE.
+# {run_id: {"phase": "P2_PROMPTS"|"P3_QA", "status": "running"|"completed"|"failed",
+#           "started_at": iso, "result": {...} | None}}
+RUN_GEN_STATE: dict[str, dict] = {}
 
+
+@app.post("/runs/{run_id}/p1/confirm")
+def p1_confirm(run_id: str, background_tasks: BackgroundTasks):
+    """Confirm dimensions and kick P2 prompt gen + P3 QA to background.
+
+    H1 fix (2026-06): the previous version ran P2 (60+ LLM calls in
+    batches of 15) and P3 (per-prompt QA) inline. On a single-worker
+    uvicorn that blocked the event loop for minutes; the generating
+    page's /api/runs/{id}/progress poll queued behind it, looking
+    like a UI freeze. Now we advance phase to P2_PROMPTS, return 303
+    immediately, and run the work via BackgroundTasks.
+    """
+    run = _get_run(run_id)
+    # P0-5 style atomic guard against double-clicks
+    cur = RUN_GEN_STATE.get(run_id, {})
+    if cur.get("status") == "running":
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+    RUN_GEN_STATE[run_id] = {
+        "phase": "P2_PROMPTS",
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "result": None,
+    }
+    run.phase = Phase.P2_PROMPTS
+    run.updated_at = datetime.now()
+    background_tasks.add_task(_run_p2_p3_background, run_id)
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+def _run_p2_p3_background(run_id: str):
+    """Background driver: P2 prompt generation → P3 QA → P4 review.
+
+    Mirrors the rewrite background flow's invariants:
+      - exception-safe: ANY failure still advances phase to P4 so the UI
+        doesn't trap the user; status="failed" is reported in RUN_GEN_STATE
+      - budget exceeded is distinguished + rolls phase back to P1 so the
+        user can raise the cap and re-confirm
+      - persist runs in a nested try/except — disk failure must not
+        prevent the in-memory state from settling on a terminal status
+    """
     from ..llm.budget import BudgetExceededError
+    run = RUNS.get(run_id)
+    if run is None:
+        RUN_GEN_STATE.pop(run_id, None)
+        return
+
+    def _settle(status: str, **extra):
+        """Write terminal state with persist failure isolated."""
+        try:
+            st = RUN_GEN_STATE.get(run_id) or {}
+            st["status"] = status
+            st["result"] = extra or None
+            RUN_GEN_STATE[run_id] = st
+            run.updated_at = datetime.now()
+            try:
+                _persist(run_id)
+            except Exception as pexc:
+                print(f"[gen-bg persist fail] run={run_id}: {pexc}", flush=True)
+        except Exception as exc:
+            print(f"[gen-bg settle fail] run={run_id}: {exc}", flush=True)
 
     # ---- P2: generate prompts ----
-    run.phase = Phase.P2_PROMPTS
     try:
+        RUN_GEN_STATE[run_id]["phase"] = "P2_PROMPTS"
         run.prompts = _try_real_prompts(run_id, run)
         if not run.prompts:
             raise RuntimeError("empty LLM response")
     except BudgetExceededError as exc:
-        # Stay in P1, surface error so user can raise the cap & re-confirm.
+        # Roll back to P1 so user can raise cap & re-confirm
         run.phase = Phase.P1_DIMENSIONS
         RUN_LAST_ERROR[run_id] = f"[预算已用满 → P2 未生成] {exc}"
-        run.updated_at = datetime.now()
-        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        _settle("failed", error=str(exc), budget_exceeded=True, phase="P2_PROMPTS")
+        return
     except Exception as exc:
+        # A3 fix: don't mock-cover an API access failure — roll back to P1
+        # and surface the real error so the user can fix creds/endpoint.
+        api_err = _classify_api_error(exc)
+        if api_err is not None and "no credentials" not in str(exc):
+            run.phase = Phase.P1_DIMENSIONS
+            RUN_LAST_ERROR[run_id] = f"[API 调用失败 · {api_err.kind}] {api_err}"
+            _settle("failed", error=str(api_err), api_error_kind=api_err.kind,
+                    phase="P2_PROMPTS")
+            return
+        # Mock fallback (existing behavior), but record the real exception
+        # type so the user can tell mock-by-design (no key) from
+        # mock-by-failure (bad key / 401 / timeout).
         RUN_LAST_ERROR[run_id] = f"[P2 失败 → 走 mock] {type(exc).__name__}: {exc}"
-        run.prompts = mock_data.generate_mock_prompts(
-            run.sl2_list, run.axes, run.target_set_size or 60
-        )
+        try:
+            run.prompts = mock_data.generate_mock_prompts(
+                run.sl2_list, run.axes, run.target_set_size or 60
+            )
+        except Exception as mock_exc:
+            run.phase = Phase.P1_DIMENSIONS
+            RUN_LAST_ERROR[run_id] = f"[P2 完全失败] {mock_exc}"
+            _settle("failed", error=str(mock_exc), phase="P2_PROMPTS")
+            return
 
-    # ---- P3: QA gate (rules + LLM naturalness + coverage audit) ----
+    # ---- P3: QA gate ----
     run.phase = Phase.P3_QA
+    RUN_GEN_STATE[run_id]["phase"] = "P3_QA"
     try:
         report = _try_real_qa(run_id, run)
         RUN_QA_REPORTS[run_id] = {
-            "total": report.total,
-            "passed": report.passed,
+            "total": report.total, "passed": report.passed,
             "pass_rate": report.pass_rate,
             "fail_rules": report.fail_rules,
             "fail_naturalness": report.fail_naturalness,
@@ -1795,19 +1978,15 @@ def p1_confirm(run_id: str):
             "judges_ran": report.judges_ran,
         }
     except BudgetExceededError as exc:
-        # P2 produced prompts but P3 hit the cap — still let the user review,
-        # just record that QA didn't run.
         RUN_QA_REPORTS[run_id] = {"error": str(exc), "judges_ran": False,
                                     "budget_exceeded": True}
         RUN_LAST_ERROR[run_id] = f"[预算已用满 → QA 跳过] {exc}"
     except Exception as e:
-        # QA failed entirely — log but don't block the user
         RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
 
-    # ---- P4: hand off to human review ----
+    # ---- P4: terminal ----
     run.phase = Phase.P4_REVIEW
-    run.updated_at = datetime.now()
-    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+    _settle("completed", phase="P4_REVIEW")
 
 
 @app.post("/runs/{run_id}/p4/rerun_qa")
@@ -1929,6 +2108,7 @@ async def api_run_progress(run_id: str):
     """
     run = _get_run(run_id)
     rw = RUN_REWRITE_STATE.get(run_id) or {}
+    gen = RUN_GEN_STATE.get(run_id) or {}
     return JSONResponse({
         "phase": run.phase.value,
         "cost_usd_used": run.cost_usd_used,
@@ -1939,6 +2119,10 @@ async def api_run_progress(run_id: str):
         "rewrite_done": rw.get("done", 0),
         "rewrite_total": rw.get("total", 0),
         "rewrite_result": rw.get("result"),
+        # Generate-flow BG status (H1 fix)
+        "gen_status": gen.get("status"),
+        "gen_phase": gen.get("phase"),
+        "gen_result": gen.get("result"),
         "last_error": RUN_LAST_ERROR.get(run_id),
         "prompts_count": len(run.prompts),
     })
@@ -2180,7 +2364,7 @@ def _cleanup_run_state(run_id: str) -> None:
     """
     for d in (RUNS, RUN_CREDS, RUN_RAW_ROWS, RUN_REWRITE_STATE,
               RUN_REWRITE_CANCEL, RUN_QA_REPORTS, RUN_DIM_CRITIQUE,
-              RUN_LAST_ERROR, RUN_INTAKE):
+              RUN_LAST_ERROR, RUN_INTAKE, RUN_GEN_STATE):
         d.pop(run_id, None)
     # Drop the per-run budget lock too (otherwise BudgetedClient._LOCKS grows)
     try:

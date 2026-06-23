@@ -177,8 +177,17 @@ function rewriteProgress() {
     },
     async cancel() {
       this.cancelling = true;
-      try { await fetch('/rewrite/{{ run.id }}/cancel', {method: 'POST'}); }
-      finally {}
+      try {
+        await fetch('/rewrite/{{ run.id }}/cancel', {method: 'POST'});
+      } catch (e) {
+        // Reset so the user can retry; cancel is idempotent
+        this.cancelling = false;
+        alert('取消请求失败: ' + e);
+      }
+      // Leave cancelling=true on success — the poll loop will exit when
+      // status flips to 'cancelled' and the redirect kicks in. If the
+      // poll loop somehow doesn't observe the flip, reset after 30s.
+      setTimeout(() => { this.cancelling = false; }, 30000);
     },
     async raiseBudget() {
       const cur = this.costLimit;
@@ -234,11 +243,13 @@ function rewriteProgress() {
 function genProgress() {
   return {
     done: false,
+    failed: false,
     costUsed: 0,
     costLimit: {{ run.cost_usd_limit }},
     costPct: 0,
     phaseLabel: '请稍候…',
     lastError: '',
+    pollErrors: 0,
     async poll() {
       const PHASE_NAMES = {
         'P0_INTAKE': '理解需求', 'P1_DIMENSIONS': '确定评测维度',
@@ -248,18 +259,36 @@ function genProgress() {
       while (true) {
         try {
           const r = await fetch('/api/runs/{{ run.id }}/progress');
+          if (!r.ok) throw new Error('HTTP ' + r.status);
           const d = await r.json();
+          this.pollErrors = 0;
           this.costUsed = d.cost_usd_used || 0;
           this.costLimit = d.cost_usd_limit || 0;
           this.costPct = d.cost_pct || 0;
           this.lastError = d.last_error || '';
+          // Surface BG-task gen status so a failed P2/P3 doesn't trap the poll
+          if (d.gen_status === 'failed') {
+            this.failed = true;
+            const detail = (d.gen_result && d.gen_result.error) || '';
+            this.lastError = this.lastError || ('[后台失败] ' + detail);
+            this.phaseLabel = '失败';
+            // Stop polling and redirect after a brief delay so user sees error
+            setTimeout(() => window.location.href = '/runs/{{ run.id }}', 1500);
+            break;
+          }
           this.phaseLabel = '阶段:' + (PHASE_NAMES[d.phase] || d.phase);
           if (d.phase === 'P4_REVIEW' || d.phase === 'P5_EXPORT' || d.phase === 'DONE') {
             this.done = true;
             setTimeout(() => window.location.href = '/runs/{{ run.id }}', 800);
             break;
           }
-        } catch (e) {}
+        } catch (e) {
+          // Surface persistent poll errors so user isn't stuck staring at spinner
+          this.pollErrors += 1;
+          if (this.pollErrors >= 5) {
+            this.lastError = '轮询失败 ' + this.pollErrors + ' 次: ' + e;
+          }
+        }
         await new Promise(r => setTimeout(r, 1500));
       }
     },
