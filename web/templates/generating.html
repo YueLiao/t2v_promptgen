@@ -269,6 +269,7 @@ function genProgress() {
           // Surface BG-task gen status so a failed P2/P3 doesn't trap the poll
           if (d.gen_status === 'failed') {
             this.failed = true;
+            this.done = true;    // P2-e: stop the spinner animation immediately
             const detail = (d.gen_result && d.gen_result.error) || '';
             this.lastError = this.lastError || ('[后台失败] ' + detail);
             this.phaseLabel = '失败';

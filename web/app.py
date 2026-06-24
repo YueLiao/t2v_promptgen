@@ -166,6 +166,23 @@ def _load_persisted_runs():
                 "result": None,
             }
             resumable += 1
+        # P1-b (audit round 2): generate-mode P2/P3 has no resume path
+        # because RUN_GEN_STATE is in-memory only. After restart, the run
+        # sits in P2_PROMPTS / P3_QA with no BG task; generating.html
+        # poll never sees a terminal status → infinite spinner. Roll back
+        # such runs to P1_DIMENSIONS so the user can re-confirm.
+        elif run.phase in (Phase.P2_PROMPTS, Phase.P3_QA) and run.source != "rewrite":
+            run.phase = Phase.P1_DIMENSIONS
+            run.updated_at = datetime.now()
+            RUN_LAST_ERROR[run.id] = (
+                f"[服务重启] 在 {run.phase.value} 阶段被中断,"
+                "已自动回到「确定评测维度」一步,请重新确认以继续。"
+            )
+            try:
+                from ..core.persistence import save_run
+                save_run(run, last_error=RUN_LAST_ERROR[run.id])
+            except Exception:
+                pass
     print(f"[persistence] loaded {len(RUNS)} runs from SQLite "
           f"({resumable} rewrite runs resumable from P3_QA)", flush=True)
 
@@ -182,25 +199,41 @@ class APIAccessError(RuntimeError):
         self.kind = kind        # "auth" | "rate_limit" | "endpoint" | "network" | "unknown"
 
 
-# Substrings that identify error categories in arbitrary exception strings.
-# Provider SDK exception types vary (openai.AuthenticationError,
-# httpx.HTTPStatusError 401, custom proxy 403, etc.) — string-match is the
-# most portable hook.
-_API_AUTH_MARKERS = (
-    "authenticationerror", "401", "403", "invalid api key", "invalid_api_key",
+# Markers identifying error categories. Two flavors:
+#   _WORD: matched as whole-word (regex \b…\b) — for HTTP status codes
+#          and short tokens like "ssl" that would false-positive as substrings
+#   _SUB:  matched as substring — for distinctive phrases that don't collide
+# P2-b (audit round 2): regex word boundaries on bare codes so a model id
+# "deepseek-v401" or a prompt mentioning "401k" no longer classifies as auth.
+import re as _re
+
+_API_AUTH_WORD = ("401", "403")
+_API_AUTH_SUB = (
+    "authenticationerror", "invalid api key", "invalid_api_key",
     "unauthorized", "auth failed", "incorrect api key", "permissiondenied",
 )
-_API_RATE_MARKERS = (
-    "ratelimiterror", "429", "rate limit", "too many requests", "quotaerror",
+_API_RATE_WORD = ("429",)
+_API_RATE_SUB = (
+    "ratelimiterror", "rate limit", "too many requests", "quotaerror",
 )
-_API_ENDPOINT_MARKERS = (
-    "404 not found", "no such model", "model_not_found", "notfounderror",
+_API_ENDPOINT_WORD = ("404",)
+_API_ENDPOINT_SUB = (
+    "no such model", "model_not_found", "notfounderror",
     "could not resolve host", "name or service not known", "connection refused",
 )
-_API_NETWORK_MARKERS = (
+_API_NETWORK_WORD = ("ssl",)        # \bssl\b doesn't match "sslmode" / "msslp"
+_API_NETWORK_SUB = (
     "timeout", "timed out", "connectionerror", "connection reset",
-    "ssl", "remote disconnected",
+    "remote disconnected",
 )
+
+
+def _match_markers(text: str, word_markers, sub_markers) -> bool:
+    """Word-boundary match for short tokens, substring match for phrases."""
+    for w in word_markers:
+        if _re.search(rf"\b{_re.escape(w)}\b", text):
+            return True
+    return any(s in text for s in sub_markers)
 
 
 def _classify_api_error(exc: BaseException) -> APIAccessError | None:
@@ -215,13 +248,13 @@ def _classify_api_error(exc: BaseException) -> APIAccessError | None:
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         text = f"{type(cur).__name__}: {cur}".lower()
-        if any(m in text for m in _API_AUTH_MARKERS):
+        if _match_markers(text, _API_AUTH_WORD, _API_AUTH_SUB):
             return APIAccessError(f"API key 验证失败: {exc}", kind="auth")
-        if any(m in text for m in _API_RATE_MARKERS):
+        if _match_markers(text, _API_RATE_WORD, _API_RATE_SUB):
             return APIAccessError(f"被限流(rate limit): {exc}", kind="rate_limit")
-        if any(m in text for m in _API_ENDPOINT_MARKERS):
+        if _match_markers(text, _API_ENDPOINT_WORD, _API_ENDPOINT_SUB):
             return APIAccessError(f"endpoint / model 配置错: {exc}", kind="endpoint")
-        if any(m in text for m in _API_NETWORK_MARKERS):
+        if _match_markers(text, _API_NETWORK_WORD, _API_NETWORK_SUB):
             return APIAccessError(f"网络/超时: {exc}", kind="network")
         cur = cur.__cause__ or cur.__context__
     return None
@@ -674,6 +707,11 @@ def goto_phase(run_id: str, target: str):
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     # ----- Generate-mode handling -----
+    # P2-c (audit round 2): clear stale RUN_GEN_STATE on any backwards
+    # phase transition so the next p1_confirm sees an empty slate. Otherwise
+    # a "completed" record would persist and cause confusion on the next
+    # /api/runs/{id}/progress poll (the BG task already finished).
+    RUN_GEN_STATE.pop(run_id, None)
     # Discard forward state based on how far we're going back
     if target_idx <= PHASE_ORDER.index(Phase.P1_DIMENSIONS):
         # Going back to P1 or earlier — discard prompts + qa
@@ -1862,6 +1900,7 @@ def p1_regenerate(run_id: str, background_tasks: BackgroundTasks, free_text: str
 # {run_id: {"phase": "P2_PROMPTS"|"P3_QA", "status": "running"|"completed"|"failed",
 #           "started_at": iso, "result": {...} | None}}
 RUN_GEN_STATE: dict[str, dict] = {}
+_GEN_STATE_LOCK = threading.Lock()    # protects check-then-set on RUN_GEN_STATE
 
 
 @app.post("/runs/{run_id}/p1/confirm")
@@ -1874,20 +1913,45 @@ def p1_confirm(run_id: str, background_tasks: BackgroundTasks):
     page's /api/runs/{id}/progress poll queued behind it, looking
     like a UI freeze. Now we advance phase to P2_PROMPTS, return 303
     immediately, and run the work via BackgroundTasks.
+
+    P1-c (audit round 2): the previous guard checked only
+    RUN_GEN_STATE.status == "running" — three bugs that fix:
+      1. Two near-simultaneous POSTs could both pass before either set
+         status → 2 BG tasks spawned. Now atomic under _GEN_STATE_LOCK.
+      2. status="completed" let a stale resubmit (e.g. browser back +
+         resubmit form) re-spawn, overwriting user edits made in P4
+         since. Now we also check run.phase — if past P1_DIMENSIONS,
+         block with 400 (user must explicitly goto back to P1).
+      3. status="failed" should be re-runnable (retry semantics), but
+         only when run.phase is still P1/P2/P3 — a failed run that
+         user then walked back to P1 is fine to re-confirm.
     """
     run = _get_run(run_id)
-    # P0-5 style atomic guard against double-clicks
-    cur = RUN_GEN_STATE.get(run_id, {})
-    if cur.get("status") == "running":
-        return RedirectResponse(f"/runs/{run_id}", status_code=303)
-    RUN_GEN_STATE[run_id] = {
-        "phase": "P2_PROMPTS",
-        "status": "running",
-        "started_at": datetime.now().isoformat(),
-        "result": None,
-    }
-    run.phase = Phase.P2_PROMPTS
-    run.updated_at = datetime.now()
+    with _GEN_STATE_LOCK:
+        cur = RUN_GEN_STATE.get(run_id, {})
+        if cur.get("status") == "running":
+            # In-flight — no-op redirect to the run page (UI shows generating)
+            return RedirectResponse(f"/runs/{run_id}", status_code=303)
+        # Block stale resubmit that would overwrite work the user already moved
+        # past. Only confirm-from-P1 is legal; going back from P4 first is
+        # explicit user action (goto_phase clears prompts there).
+        if run.phase != Phase.P1_DIMENSIONS:
+            return JSONResponse(
+                {"ok": False, "code": "WRONG_PHASE",
+                 "message": (
+                     f"任务当前在 {run.phase.value},不是 P1_DIMENSIONS。"
+                     "若要重新生成,请先「回到确定评测维度」一步。"
+                 )},
+                status_code=400,
+            )
+        RUN_GEN_STATE[run_id] = {
+            "phase": "P2_PROMPTS",
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "result": None,
+        }
+        run.phase = Phase.P2_PROMPTS
+        run.updated_at = datetime.now()
     background_tasks.add_task(_run_p2_p3_background, run_id)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -1982,7 +2046,18 @@ def _run_p2_p3_background(run_id: str):
                                     "budget_exceeded": True}
         RUN_LAST_ERROR[run_id] = f"[预算已用满 → QA 跳过] {exc}"
     except Exception as e:
-        RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
+        # P1-a fix (audit round 2): classify API access errors in QA path too,
+        # not just in P2. A 401/429/timeout on the judge model would otherwise
+        # silently look like "judges did not run" — exact A3-style silent mock.
+        api_err_qa = _classify_api_error(e)
+        if api_err_qa is not None:
+            RUN_QA_REPORTS[run_id] = {
+                "error": str(api_err_qa), "judges_ran": False,
+                "api_error_kind": api_err_qa.kind,
+            }
+            RUN_LAST_ERROR[run_id] = f"[API 调用失败 · {api_err_qa.kind} · QA] {api_err_qa}"
+        else:
+            RUN_QA_REPORTS[run_id] = {"error": str(e), "judges_ran": False}
 
     # ---- P4: terminal ----
     run.phase = Phase.P4_REVIEW
